@@ -30,14 +30,14 @@ mkdir -p .env
 echo "DATABASE_PASSWORD=secret" > .env/api.example.com
 
 # 4. Deploy!
-./dispatch.sh
+./deploy.sh
 ```
 
 ## Directory Structure
 
 ```
 your-project/
-├── dispatch.sh              # Main deployment script
+├── deploy.sh              # Main deployment script
 ├── config.json              # Your deployment configuration
 ├── .env/                    # Secret environment variables (gitignored)
 │   ├── _api                 # Shared secrets for all "api" source_dir apps
@@ -139,31 +139,31 @@ DATABASE_PASSWORD=production-secret
 
 ```bash
 # Deploy all apps
-./dispatch.sh
+./deploy.sh
 
 # Deploy specific app(s)
-./dispatch.sh api.example.com
-./dispatch.sh api.example.com www.example.com
+./deploy.sh api.example.com
+./deploy.sh api.example.com www.example.com
 
 # Deploy by tag
-./dispatch.sh --tag staging
-./dispatch.sh --tag api
-./dispatch.sh --tag staging --tag api  # OR logic
+./deploy.sh --tag staging
+./deploy.sh --tag api
+./deploy.sh --tag staging --tag api  # OR logic
 
 # Skip production
-./dispatch.sh --no-prod
+./deploy.sh --no-prod
 
 # Dry run (see what would happen)
-./dispatch.sh --dry-run
+./deploy.sh --dry-run
 
 # Force deploy (even if no code changes)
-./dispatch.sh --force
+./deploy.sh --force
 
 # Update config only (no code deploy, just env vars + restart)
-./dispatch.sh --config-only api.example.com
+./deploy.sh --config-only api.example.com
 
 # Skip confirmation prompts
-./dispatch.sh --yes
+./deploy.sh --yes
 ```
 
 ## Deploy Hooks
