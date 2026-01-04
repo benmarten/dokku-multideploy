@@ -1,0 +1,67 @@
+{
+  "ssh_host": "dokku@your-server.com",
+  "ssh_alias": "dokku",
+
+  "api": {
+    "source_dir": "api",
+    "branch": "main",
+    "postgres": true,
+    "letsencrypt": true,
+    "env_vars": {
+      "NODE_ENV": "production"
+    },
+    "deployments": {
+      "api.example.com": {
+        "tags": ["production", "api"],
+        "env_vars": {
+          "LOG_LEVEL": "warn"
+        }
+      },
+      "api-staging.example.com": {
+        "tags": ["staging", "api"],
+        "env_vars": {
+          "LOG_LEVEL": "debug"
+        }
+      }
+    }
+  },
+
+  "web": {
+    "source_dir": "web",
+    "branch": "main",
+    "letsencrypt": true,
+    "ports": ["http:80:3000"],
+    "build_args": {
+      "NODE_ENV": "production"
+    },
+    "deployments": {
+      "www.example.com": {
+        "tags": ["production", "web"],
+        "extra_domains": ["example.com"],
+        "build_args": {
+          "API_URL": "https://api.example.com"
+        }
+      },
+      "staging.example.com": {
+        "tags": ["staging", "web"],
+        "build_args": {
+          "API_URL": "https://api-staging.example.com"
+        }
+      }
+    }
+  },
+
+  "worker": {
+    "source_dir": "worker",
+    "branch": "main",
+    "postgres": true,
+    "storage_mounts": [
+      "/var/lib/dokku/data/storage/worker:/app/data"
+    ],
+    "deployments": {
+      "worker.example.com": {
+        "tags": ["production", "service"]
+      }
+    }
+  }
+}

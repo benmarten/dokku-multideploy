@@ -1,0 +1,20 @@
+# Secrets
+.env/
+.env.*
+!.env.example
+
+# Config (contains server-specific settings)
+config.json
+
+# SSL certificates
+certs/
+
+# macOS
+.DS_Store
+
+# Editor
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
