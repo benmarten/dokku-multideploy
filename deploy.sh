@@ -487,11 +487,17 @@ deploy_app() {
     # Check if deployment is needed by comparing local and remote commits
     echo -e "${BLUE}Checking if deployment is needed...${NC}"
 
+    # Detect Dokku's deploy branch for this app (defaults to master)
+    local dokku_branch=$(ssh $SSH_ALIAS "dokku git:report $app_name 2>/dev/null | grep 'Git deploy branch:' | awk '{print \$NF}'" || echo "master")
+    if [ -z "$dokku_branch" ] || [ "$dokku_branch" = "deploy" ]; then
+        dokku_branch="master"
+    fi
+
     # Fetch remote state quietly
-    git fetch "$remote_name" main 2>/dev/null || true
+    git fetch "$remote_name" "$dokku_branch" 2>/dev/null || true
 
     local local_commit=$(git rev-parse "$repo_branch" 2>/dev/null)
-    local remote_commit=$(git rev-parse "$remote_name/main" 2>/dev/null || echo "")
+    local remote_commit=$(git rev-parse "$remote_name/$dokku_branch" 2>/dev/null || echo "")
 
     if [ "$FORCE_DEPLOY" = false ] && [ -n "$remote_commit" ] && [ "$local_commit" = "$remote_commit" ]; then
         echo -e "${GREEN}Remote is already up-to-date (${local_commit:0:8}), skipping deployment${NC}"
@@ -748,14 +754,14 @@ deploy_app() {
     echo ""
 
     # Try to push without force first
-    if git push "$remote_name" "$repo_branch:refs/heads/main"; then
+    if git push "$remote_name" "$repo_branch:refs/heads/$dokku_branch"; then
         echo ""
         echo -e "${GREEN}Pushed successfully${NC}"
     else
         # If that fails, it's likely a new app or history diverged
         echo ""
         echo -e "${YELLOW}Normal push failed, attempting force push...${NC}"
-        git push "$remote_name" "$repo_branch:refs/heads/main" -f
+        git push "$remote_name" "$repo_branch:refs/heads/$dokku_branch" -f
     fi
 
     # Run post-deploy hook if it exists
