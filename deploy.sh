@@ -156,7 +156,15 @@ import_from_server() {
 
     # Create import directory
     mkdir -p "$import_dir"
-    mkdir -p "$SCRIPT_DIR/.env.imported"
+
+    # Determine env path upfront
+    local env_path
+    if [ -d "$SCRIPT_DIR/.env" ] && [ "$(ls -A "$SCRIPT_DIR/.env" 2>/dev/null)" ]; then
+        env_path="$SCRIPT_DIR/.env.imported"
+    else
+        env_path="$SCRIPT_DIR/.env"
+    fi
+    mkdir -p "$env_path"
 
     # Get list of apps
     echo -e "${BLUE}Fetching app list...${NC}"
@@ -281,8 +289,9 @@ import_from_server() {
             local env_vars
             env_vars=$(ssh "$ssh_alias" "dokku config:export $app" 2>/dev/null || true)
             if [ -n "$env_vars" ]; then
-                echo "$env_vars" > "$SCRIPT_DIR/.env.imported/$primary_domain"
-                echo -e "  ${GREEN}Saved to .env.imported/$primary_domain${NC}"
+                echo "$env_vars" > "$env_path/$primary_domain"
+                local env_rel_path="${env_path#$SCRIPT_DIR/}"
+                echo -e "  ${GREEN}Saved to $env_rel_path/$primary_domain${NC}"
             fi
         fi
 
@@ -327,8 +336,23 @@ import_from_server() {
         echo ""
     done
 
-    # Write config.imported.json (don't overwrite existing config.json)
-    local config_path="$SCRIPT_DIR/config.imported.json"
+    # Determine config path based on existing files
+    local config_path
+    local needs_manual_step=false
+
+    if [ -f "$SCRIPT_DIR/config.json" ]; then
+        config_path="$SCRIPT_DIR/config.imported.json"
+        needs_manual_step=true
+    else
+        config_path="$SCRIPT_DIR/config.json"
+    fi
+
+    # Check if we wrote to .env.imported (existing .env had files)
+    if [ "$env_path" = "$SCRIPT_DIR/.env.imported" ]; then
+        needs_manual_step=true
+    fi
+
+    # Write config
     echo "$config_json" | jq '.' > "$config_path"
 
     echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
@@ -338,22 +362,24 @@ import_from_server() {
     echo -e "  Apps cloned to:   ${BLUE}$import_dir/${NC}"
     echo -e "  Config saved to:  ${BLUE}$config_path${NC}"
     if [ "$import_secrets" = true ]; then
-        echo -e "  Secrets saved to: ${BLUE}$SCRIPT_DIR/.env.imported/${NC}"
+        echo -e "  Secrets saved to: ${BLUE}$env_path/${NC}"
     fi
     echo ""
 
-    # Show diff if existing config.json exists
-    if [ -f "$SCRIPT_DIR/config.json" ]; then
-        echo -e "${YELLOW}Existing config.json found. To compare:${NC}"
-        echo "  diff config.json config.imported.json"
+    if [ "$needs_manual_step" = true ]; then
+        echo -e "${YELLOW}Existing config found. To use imported config:${NC}"
+        if [ "$config_path" = "$SCRIPT_DIR/config.imported.json" ]; then
+            echo "  mv config.imported.json config.json"
+        fi
+        if [ "$env_path" = "$SCRIPT_DIR/.env.imported" ]; then
+            echo "  mv .env.imported/* .env/"
+        fi
         echo ""
-        echo -e "${YELLOW}To use imported config:${NC}"
-        echo "  mv config.imported.json config.json"
     else
-        echo -e "${YELLOW}To activate:${NC}"
-        echo "  mv config.imported.json config.json"
+        echo -e "${GREEN}Ready to deploy! Test with:${NC}"
+        echo "  ./deploy.sh --dry-run"
+        echo ""
     fi
-    echo ""
 }
 
 # Handle import mode
