@@ -199,12 +199,12 @@ import_from_server() {
         local domains
         domains=$(ssh "$ssh_alias" "dokku domains:report $app" 2>/dev/null | grep "Domains app vhosts:" | sed 's/.*Domains app vhosts:[[:space:]]*//')
 
-        # Find custom domain (one that doesn't start with the app name)
+        # Find custom domains (exclude auto-generated ones starting with app-name.)
         local primary_domain=""
         local extra_domains=""
         local app_prefix="${app}."
 
-        # First pass: look for a domain that doesn't start with app name (custom domain)
+        # Collect only custom domains (not starting with app name)
         for domain in $domains; do
             if [[ "$domain" != ${app_prefix}* ]]; then
                 if [ -z "$primary_domain" ]; then
@@ -214,19 +214,12 @@ import_from_server() {
                 fi
             fi
         done
-
-        # Second pass: add auto-generated domains to extra_domains
-        for domain in $domains; do
-            if [[ "$domain" == ${app_prefix}* ]]; then
-                extra_domains="$extra_domains $domain"
-            fi
-        done
         extra_domains=$(echo "$extra_domains" | xargs)  # trim whitespace
 
-        # If no custom domain found, use first domain
+        # If no custom domain found, use first available domain as primary (but no extras)
         if [ -z "$primary_domain" ]; then
             primary_domain=$(echo "$domains" | awk '{print $1}')
-            extra_domains=$(echo "$domains" | awk '{for(i=2;i<=NF;i++) print $i}' | xargs)
+            extra_domains=""
         fi
 
         if [ -z "$primary_domain" ] || [ "$primary_domain" = "$app" ]; then
@@ -234,28 +227,39 @@ import_from_server() {
         fi
         echo -e "  Domain: $primary_domain"
 
-        # Get ports
-        local ports_raw
-        ports_raw=$(ssh "$ssh_alias" "dokku ports:report $app" 2>/dev/null | grep "Ports map:" | sed 's/.*Ports map:[[:space:]]*//')
-        local ports_json="[]"
-        if [ -n "$ports_raw" ] && [ "$ports_raw" != "" ]; then
-            ports_json=$(echo "$ports_raw" | tr ' ' '\n' | grep -v '^$' | while read port_map; do
-                scheme=$(echo "$port_map" | cut -d: -f1)
-                host_port=$(echo "$port_map" | cut -d: -f2)
-                container_port=$(echo "$port_map" | cut -d: -f3)
-                echo "{\"scheme\":\"$scheme\",\"host\":$host_port,\"container\":$container_port}"
-            done | jq -s '.')
+        # Rename cloned directory to use domain name (matches source_dir)
+        local domain_dir="$import_dir/$primary_domain"
+        if [ "$app_dir" != "$domain_dir" ] && [ -d "$app_dir" ] && [ ! -d "$domain_dir" ]; then
+            mv "$app_dir" "$domain_dir"
         fi
 
-        # Get storage mounts
+        # Get ports (skip default http:80:* single port mappings)
+        local ports_raw
+        ports_raw=$(ssh "$ssh_alias" "dokku ports:report $app" 2>/dev/null | grep "Ports map:" | grep -v "detected:" | sed 's/.*Ports map:[[:space:]]*//')
+        local ports_json="[]"
+        if [ -n "$ports_raw" ] && [ "$ports_raw" != "" ]; then
+            # Check if it's just a default single http:80:* mapping
+            local port_count=$(echo "$ports_raw" | wc -w | tr -d ' ')
+            local is_default=false
+            if [ "$port_count" -eq 1 ] && [[ "$ports_raw" == http:80:* ]]; then
+                is_default=true
+            fi
+            if [ "$is_default" = false ]; then
+                # Output as strings like "http:80:5000"
+                ports_json=$(echo "$ports_raw" | tr ' ' '\n' | grep -v '^$' | while read port_map; do
+                    echo "\"$port_map\""
+                done | jq -s '.')
+            fi
+        fi
+
+        # Get storage mounts (from deploy mounts, format: -v /host:/container)
         local storage_raw
-        storage_raw=$(ssh "$ssh_alias" "dokku storage:report $app" 2>/dev/null | grep "Storage bind mounts:" | sed 's/.*Storage bind mounts:[[:space:]]*//')
+        storage_raw=$(ssh "$ssh_alias" "dokku storage:report $app" 2>/dev/null | grep "Storage deploy mounts:" | sed 's/.*Storage deploy mounts:[[:space:]]*//')
         local storage_json="[]"
-        if [ -n "$storage_raw" ] && [ "$storage_raw" != "" ] && [ "$storage_raw" != "none" ]; then
-            storage_json=$(echo "$storage_raw" | tr ' ' '\n' | grep -v '^$' | while read mount; do
-                host_path=$(echo "$mount" | cut -d: -f1)
-                container_path=$(echo "$mount" | cut -d: -f2)
-                echo "{\"host\":\"$host_path\",\"container\":\"$container_path\"}"
+        if [ -n "$storage_raw" ] && [ "$storage_raw" != "" ]; then
+            # Parse -v /host:/container format, output as "host:container" strings
+            storage_json=$(echo "$storage_raw" | grep -oE '/[^:]+:[^ ]+' | while read mount; do
+                echo "\"$mount\""
             done | jq -s '.')
         fi
 
@@ -303,7 +307,7 @@ import_from_server() {
         # Build deployment config
         local deployment_config=$(jq -n \
             --arg domain "$primary_domain" \
-            --arg source_dir "$app" \
+            --arg source_dir "$primary_domain" \
             --arg branch "$branch" \
             --arg postgres "$postgres" \
             --arg letsencrypt "$letsencrypt" \
