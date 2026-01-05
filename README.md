@@ -1,6 +1,6 @@
 # dokku-multideploy
 
-Deploy multiple applications to a single Dokku server with centralized configuration.
+Deploy multiple applications to a single Dokku server with centralized configuration. Import existing apps from a server, migrate between servers, or set up fresh deployments.
 
 ## Features
 
@@ -13,7 +13,7 @@ Deploy multiple applications to a single Dokku server with centralized configura
 - **PostgreSQL auto-setup** - Opt-in automatic database provisioning
 - **Let's Encrypt SSL** - Opt-in automatic SSL certificate provisioning
 - **Storage mounts, ports, domains** - Full Dokku configuration support
-- **Import from existing server** - Pull all apps and config from a Dokku server
+- **Server import/migration** - Import all apps from existing server, migrate to new server
 
 ## Prerequisites
 
