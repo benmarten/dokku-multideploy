@@ -15,6 +15,20 @@ Deploy multiple applications to a single Dokku server with centralized configura
 - **Storage mounts, ports, domains** - Full Dokku configuration support
 - **Import from existing server** - Pull all apps and config from a Dokku server
 
+## Prerequisites
+
+Configure your Dokku server in `~/.ssh/config`:
+
+```
+Host dokku
+  HostName your-server-ip
+  User root
+  IdentityFile ~/.ssh/id_rsa
+  IdentitiesOnly yes
+```
+
+Then use `dokku` as the `ssh_alias` in your config.json.
+
 ## Quick Start
 
 ```bash
@@ -60,6 +74,29 @@ diff config.json config.imported.json
 mv config.imported.json config.json
 mv .env.imported/* .env/
 ```
+
+## Server Migration
+
+Migrate all apps to a new server:
+
+```bash
+# 1. Import from current server (if not already done)
+./deploy.sh --import ./apps --ssh old-server
+
+# 2. Set up new server with Dokku
+ssh new-server "wget -NP . https://dokku.com/install/v0.34.4/bootstrap.sh && sudo bash bootstrap.sh"
+
+# 3. Update SSH config for new server
+#    Edit ~/.ssh/config to add new-server alias
+
+# 4. Update config.json
+#    Change ssh_host and ssh_alias to new server
+
+# 5. Deploy everything to new server
+./deploy.sh
+```
+
+The script will create all apps, configure domains, env vars, storage mounts, ports, postgres, and letsencrypt on the new server.
 
 ## Directory Structure
 
