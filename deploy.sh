@@ -157,13 +157,8 @@ import_from_server() {
     # Create import directory
     mkdir -p "$import_dir"
 
-    # Determine env path upfront
-    local env_path
-    if [ -d "$SCRIPT_DIR/.env" ] && [ "$(ls -A "$SCRIPT_DIR/.env" 2>/dev/null)" ]; then
-        env_path="$SCRIPT_DIR/.env.imported"
-    else
-        env_path="$SCRIPT_DIR/.env"
-    fi
+    # All output goes to import directory
+    local env_path="$import_dir/.env"
     mkdir -p "$env_path"
 
     # Get list of apps
@@ -336,50 +331,24 @@ import_from_server() {
         echo ""
     done
 
-    # Determine config path based on existing files
-    local config_path
-    local needs_manual_step=false
-
-    if [ -f "$SCRIPT_DIR/config.json" ]; then
-        config_path="$SCRIPT_DIR/config.imported.json"
-        needs_manual_step=true
-    else
-        config_path="$SCRIPT_DIR/config.json"
-    fi
-
-    # Check if we wrote to .env.imported (existing .env had files)
-    if [ "$env_path" = "$SCRIPT_DIR/.env.imported" ]; then
-        needs_manual_step=true
-    fi
-
-    # Write config
+    # Write config to import directory
+    local config_path="$import_dir/config.json"
     echo "$config_json" | jq '.' > "$config_path"
 
     echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
     echo -e "${GREEN}Import complete!${NC}"
     echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
     echo ""
-    echo -e "  Apps cloned to:   ${BLUE}$import_dir/${NC}"
-    echo -e "  Config saved to:  ${BLUE}$config_path${NC}"
+    echo -e "  Config:  ${BLUE}$config_path${NC}"
     if [ "$import_secrets" = true ]; then
-        echo -e "  Secrets saved to: ${BLUE}$env_path/${NC}"
+        echo -e "  Secrets: ${BLUE}$env_path/${NC}"
     fi
+    echo -e "  Apps:    ${BLUE}$import_dir/<app-name>/${NC}"
     echo ""
-
-    if [ "$needs_manual_step" = true ]; then
-        echo -e "${YELLOW}Existing config found. To use imported config:${NC}"
-        if [ "$config_path" = "$SCRIPT_DIR/config.imported.json" ]; then
-            echo "  mv config.imported.json config.json"
-        fi
-        if [ "$env_path" = "$SCRIPT_DIR/.env.imported" ]; then
-            echo "  mv .env.imported/* .env/"
-        fi
-        echo ""
-    else
-        echo -e "${GREEN}Ready to deploy! Test with:${NC}"
-        echo "  ./deploy.sh --dry-run"
-        echo ""
-    fi
+    echo -e "${GREEN}To deploy, symlink deploy.sh and run:${NC}"
+    echo "  ln -s $(cd "$SCRIPT_DIR" && pwd)/deploy.sh $import_dir/deploy.sh"
+    echo "  cd $import_dir && ./deploy.sh --dry-run"
+    echo ""
 }
 
 # Handle import mode
