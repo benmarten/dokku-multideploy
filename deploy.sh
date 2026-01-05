@@ -270,9 +270,10 @@ import_from_server() {
             echo -e "  PostgreSQL: linked"
         fi
 
-        # Check Let's Encrypt
+        # Check Let's Encrypt (command outputs "true" or "false" as text)
         local letsencrypt="false"
-        if ssh "$ssh_alias" "dokku letsencrypt:active $app" &>/dev/null 2>&1; then
+        local le_status=$(ssh "$ssh_alias" "dokku letsencrypt:active $app" 2>/dev/null || echo "false")
+        if [ "$le_status" = "true" ]; then
             letsencrypt="true"
             echo -e "  Let's Encrypt: active"
         fi
