@@ -18,7 +18,7 @@ Deploy multiple applications to a single Dokku server with centralized configura
 
 ```bash
 # 1. Clone this repo (or copy files to your project)
-git clone https://github.com/youruser/dokku-multideploy.git
+git clone https://github.com/benmarten/dokku-multideploy.git
 cd dokku-multideploy
 
 # 2. Create your config
