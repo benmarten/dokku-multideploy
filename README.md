@@ -32,12 +32,13 @@ Then use `dokku` as the `ssh_alias` in your config.json.
 ## Quick Start
 
 ```bash
-# 1. Clone this repo (or copy files to your project)
+# 1. Clone this repo
 git clone https://github.com/benmarten/dokku-multideploy.git
-cd dokku-multideploy
 
-# 2. Create your config
-cp config.example.json config.json
+# 2. Set up your project (symlink into your project directory)
+cd your-project
+ln -s /path/to/dokku-multideploy/deploy.sh .
+cp /path/to/dokku-multideploy/config.example.json config.json
 # Edit config.json with your apps
 
 # 3. Add secrets (optional)
