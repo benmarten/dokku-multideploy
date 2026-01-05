@@ -317,17 +317,15 @@ import_from_server() {
             '{
                 source_dir: $source_dir,
                 branch: $branch,
-                postgres: ($postgres == "true"),
-                letsencrypt: ($letsencrypt == "true"),
+                postgres: (if $postgres == "true" then true else null end),
+                letsencrypt: (if $letsencrypt == "true" then true else null end),
                 ports: (if $ports == [] then null else $ports end),
                 storage_mounts: (if $storage == [] then null else $storage end),
                 extra_domains: (if $extra_domains == [] then null else $extra_domains end),
                 deployments: {
-                    ($domain): {
-                        tags: ["imported"]
-                    }
+                    ($domain): {}
                 }
-            } | with_entries(select(.value != null))')
+            } | with_entries(select(.value != null and .value != false))')
 
         # Add to main config
         config_json=$(echo "$config_json" | jq --arg key "$parent_key" --argjson config "$deployment_config" '.[$key] = $config')

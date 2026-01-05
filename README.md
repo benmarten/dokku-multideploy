@@ -61,18 +61,15 @@ Already have apps running on a Dokku server? Import everything:
 ```
 
 This will:
-1. Clone all app git repos to `./apps/`
-2. Generate `config.imported.json` with all settings (domains, ports, storage, postgres, letsencrypt)
-3. Export env vars to `.env.imported/` files
+1. Clone all app git repos to `./apps/<domain>/`
+2. Generate `config.json` with settings (domains, ports, storage, postgres, letsencrypt)
+3. Export all env vars to `.env/` files (not config.json, since we can't distinguish secrets)
 
-Then review and activate:
+Then symlink deploy.sh and you're ready:
 ```bash
-# Compare with existing config (if any)
-diff config.json config.imported.json
-
-# Activate imported config
-mv config.imported.json config.json
-mv .env.imported/* .env/
+cd ./apps
+ln -s /path/to/dokku-multideploy/deploy.sh .
+./deploy.sh --dry-run
 ```
 
 ## Server Migration
