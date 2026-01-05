@@ -13,6 +13,7 @@ Deploy multiple applications to a single Dokku server with centralized configura
 - **PostgreSQL auto-setup** - Opt-in automatic database provisioning
 - **Let's Encrypt SSL** - Opt-in automatic SSL certificate provisioning
 - **Storage mounts, ports, domains** - Full Dokku configuration support
+- **Import from existing server** - Pull all apps and config from a Dokku server
 
 ## Quick Start
 
@@ -31,6 +32,33 @@ echo "DATABASE_PASSWORD=secret" > .env/api.example.com
 
 # 4. Deploy!
 ./deploy.sh
+```
+
+## Import from Existing Server
+
+Already have apps running on a Dokku server? Import everything:
+
+```bash
+# Import all apps from your Dokku server
+./deploy.sh --import ./apps --ssh your-ssh-alias
+
+# Import without secrets (env vars)
+./deploy.sh --import ./apps --ssh your-ssh-alias --no-secrets
+```
+
+This will:
+1. Clone all app git repos to `./apps/`
+2. Generate `config.imported.json` with all settings (domains, ports, storage, postgres, letsencrypt)
+3. Export env vars to `.env.imported/` files
+
+Then review and activate:
+```bash
+# Compare with existing config (if any)
+diff config.json config.imported.json
+
+# Activate imported config
+mv config.imported.json config.json
+mv .env.imported/* .env/
 ```
 
 ## Directory Structure
