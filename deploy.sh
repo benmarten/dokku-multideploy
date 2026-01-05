@@ -145,7 +145,7 @@ DEPLOYMENTS=()
 # Process each parent type
 for parent_type in $(jq -r 'keys[] | select(. != "ssh_host" and . != "ssh_alias")' "$CONFIG_FILE"); do
     # Get parent config
-    parent_config=$(jq -c ".${parent_type}" "$CONFIG_FILE")
+    parent_config=$(jq -c ".[\"${parent_type}\"]" "$CONFIG_FILE")
     parent_source_dir=$(echo "$parent_config" | jq -r '.source_dir // ""')
     parent_branch=$(echo "$parent_config" | jq -r '.branch // ""')
     parent_env_vars=$(echo "$parent_config" | jq -c '.env_vars // {}')
