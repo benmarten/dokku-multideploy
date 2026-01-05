@@ -101,7 +101,7 @@ your-project/
 #### Parent Level (e.g., "api", "web")
 | Key | Description |
 |-----|-------------|
-| `source_dir` | Directory containing the source code and Dockerfile |
+| `source_dir` | Directory containing the source code and Dockerfile. Supports relative paths (`api`, `../sibling-repo`) or absolute paths (`/path/to/project`) |
 | `branch` | Git branch to deploy (auto-detects if not set) |
 | `postgres` | Auto-create and link PostgreSQL database (`true`/`false`) |
 | `letsencrypt` | Auto-provision Let's Encrypt SSL (`true`/`false`) |

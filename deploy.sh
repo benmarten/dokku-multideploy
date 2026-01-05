@@ -383,7 +383,13 @@ deploy_app() {
     local source_dir=$(echo "$deployment" | jq -r '.source_dir')
     local app_name=$(echo "$domain" | tr '.' '-')
     local dockerfile="Dockerfile"
-    local source_path="$SCRIPT_DIR/$source_dir"
+    # Support absolute paths (starting with /) or relative paths
+    local source_path
+    if [[ "$source_dir" == /* ]]; then
+        source_path="$source_dir"
+    else
+        source_path="$SCRIPT_DIR/$source_dir"
+    fi
     local enable_postgres=$(echo "$deployment" | jq -r '.postgres')
     local enable_letsencrypt=$(echo "$deployment" | jq -r '.letsencrypt')
 
