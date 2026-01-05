@@ -5,6 +5,7 @@
 
 # Config (contains server-specific settings)
 config.json
+config.imported.json
 
 # SSL certificates
 certs/

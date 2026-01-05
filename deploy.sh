@@ -20,19 +20,16 @@ if ! command -v jq &> /dev/null; then
     exit 1
 fi
 
-# Check if config file exists
-if [ ! -f "$CONFIG_FILE" ]; then
-    echo -e "${RED}Error: $CONFIG_FILE not found${NC}"
-    echo "Copy config.example.json to config.json and configure your deployments."
-    exit 1
-fi
-
 # Parse options
 DRY_RUN=false
 NO_PROD=false
 YES_TO_ALL=false
 FORCE_DEPLOY=false
 CONFIG_ONLY=false
+IMPORT_MODE=false
+IMPORT_DIR=""
+IMPORT_SECRETS=true
+IMPORT_SSH=""
 FILTER_TAGS=()
 SELECTED_DEPLOYMENTS=()
 
@@ -48,6 +45,9 @@ show_help() {
     echo "  --no-prod           Skip production deployments"
     echo "  --yes               Skip confirmation prompts (use with caution)"
     echo "  --tag <tag>         Deploy only apps with this tag (can be used multiple times)"
+    echo "  --import <dir>      Import all apps from Dokku server to <dir>"
+    echo "  --ssh <alias>       SSH alias for Dokku server (use with --import)"
+    echo "  --no-secrets        Skip importing env vars (use with --import)"
     echo "  --help              Show this help message"
     echo ""
     echo "Examples:"
@@ -60,6 +60,10 @@ show_help() {
     echo "  $0 --tag staging --tag api       # Deploy apps tagged 'staging' OR 'api'"
     echo "  $0 api.example.com               # Deploy specific app"
     echo "  $0 api.example.com www.example.com  # Deploy multiple apps"
+    echo ""
+    echo "Import from existing Dokku server:"
+    echo "  $0 --import ./apps --ssh co     # Clone all apps, generate config.json"
+    echo "  $0 --import ./apps --ssh co --no-secrets # Import without env vars"
     echo ""
 }
 
@@ -89,6 +93,19 @@ while [[ $# -gt 0 ]]; do
             FILTER_TAGS+=("$2")
             shift 2
             ;;
+        --import)
+            IMPORT_MODE=true
+            IMPORT_DIR="$2"
+            shift 2
+            ;;
+        --ssh)
+            IMPORT_SSH="$2"
+            shift 2
+            ;;
+        --no-secrets)
+            IMPORT_SECRETS=false
+            shift
+            ;;
         --help|-h)
             show_help
             exit 0
@@ -104,6 +121,264 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Import Mode - Import all apps from existing Dokku server
+# ═══════════════════════════════════════════════════════════════════════════════
+
+import_from_server() {
+    local import_dir="$1"
+    local ssh_alias="$2"
+    local import_secrets="$3"
+
+    echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
+    echo -e "${BLUE}   dokku-multideploy - Import Mode${NC}"
+    echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
+    echo ""
+
+    # Check connectivity
+    echo -e "${BLUE}Checking Dokku connectivity...${NC}"
+    if ! ssh -o ConnectTimeout=10 "$ssh_alias" "echo 'Connection OK'" &>/dev/null; then
+        echo -e "${RED}Cannot connect to Dokku at $ssh_alias${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}Connected to Dokku${NC}"
+    echo ""
+
+    # Get SSH host for git clone (dokku@host format)
+    local ssh_host
+    ssh_host=$(ssh "$ssh_alias" "echo \$SSH_CONNECTION" | awk '{print $3}')
+    if [ -z "$ssh_host" ]; then
+        # Fallback: try to get from ssh config
+        ssh_host=$(ssh -G "$ssh_alias" | grep "^hostname " | awk '{print $2}')
+    fi
+    echo -e "${BLUE}Dokku host: $ssh_host${NC}"
+
+    # Create import directory
+    mkdir -p "$import_dir"
+    mkdir -p "$SCRIPT_DIR/.env.imported"
+
+    # Get list of apps
+    echo -e "${BLUE}Fetching app list...${NC}"
+    local apps
+    apps=$(ssh "$ssh_alias" "dokku apps:list" | tail -n +2)
+    local app_count=$(echo "$apps" | wc -l | tr -d ' ')
+    echo -e "${GREEN}Found $app_count apps${NC}"
+    echo ""
+
+    # Initialize config structure
+    local config_json='{"ssh_alias": "'$ssh_alias'", "ssh_host": "dokku@'$ssh_host'"}'
+
+    # Process each app
+    local count=0
+    for app in $apps; do
+        count=$((count + 1))
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${GREEN}[$count/$app_count] Processing: $app${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+        local app_dir="$import_dir/$app"
+
+        # Clone git repo
+        echo -e "  ${BLUE}Cloning git repo...${NC}"
+        if [ -d "$app_dir" ]; then
+            echo -e "  ${YELLOW}Directory exists, pulling latest...${NC}"
+            git -C "$app_dir" pull --ff-only 2>/dev/null || true
+        else
+            if ! git clone "dokku@$ssh_host:$app" "$app_dir" 2>/dev/null; then
+                echo -e "  ${YELLOW}No git repo (app may not have been deployed yet)${NC}"
+                mkdir -p "$app_dir"
+            fi
+        fi
+
+        # Get primary domain
+        # Prefer custom domains over auto-generated ones (domains starting with app-name)
+        local domains
+        domains=$(ssh "$ssh_alias" "dokku domains:report $app" 2>/dev/null | grep "Domains app vhosts:" | sed 's/.*Domains app vhosts:[[:space:]]*//')
+
+        # Find custom domain (one that doesn't start with the app name)
+        local primary_domain=""
+        local extra_domains=""
+        local app_prefix="${app}."
+
+        # First pass: look for a domain that doesn't start with app name (custom domain)
+        for domain in $domains; do
+            if [[ "$domain" != ${app_prefix}* ]]; then
+                if [ -z "$primary_domain" ]; then
+                    primary_domain="$domain"
+                else
+                    extra_domains="$extra_domains $domain"
+                fi
+            fi
+        done
+
+        # Second pass: add auto-generated domains to extra_domains
+        for domain in $domains; do
+            if [[ "$domain" == ${app_prefix}* ]]; then
+                extra_domains="$extra_domains $domain"
+            fi
+        done
+        extra_domains=$(echo "$extra_domains" | xargs)  # trim whitespace
+
+        # If no custom domain found, use first domain
+        if [ -z "$primary_domain" ]; then
+            primary_domain=$(echo "$domains" | awk '{print $1}')
+            extra_domains=$(echo "$domains" | awk '{for(i=2;i<=NF;i++) print $i}' | xargs)
+        fi
+
+        if [ -z "$primary_domain" ] || [ "$primary_domain" = "$app" ]; then
+            primary_domain="$app"
+        fi
+        echo -e "  Domain: $primary_domain"
+
+        # Get ports
+        local ports_raw
+        ports_raw=$(ssh "$ssh_alias" "dokku ports:report $app" 2>/dev/null | grep "Ports map:" | sed 's/.*Ports map:[[:space:]]*//')
+        local ports_json="[]"
+        if [ -n "$ports_raw" ] && [ "$ports_raw" != "" ]; then
+            ports_json=$(echo "$ports_raw" | tr ' ' '\n' | grep -v '^$' | while read port_map; do
+                scheme=$(echo "$port_map" | cut -d: -f1)
+                host_port=$(echo "$port_map" | cut -d: -f2)
+                container_port=$(echo "$port_map" | cut -d: -f3)
+                echo "{\"scheme\":\"$scheme\",\"host\":$host_port,\"container\":$container_port}"
+            done | jq -s '.')
+        fi
+
+        # Get storage mounts
+        local storage_raw
+        storage_raw=$(ssh "$ssh_alias" "dokku storage:report $app" 2>/dev/null | grep "Storage bind mounts:" | sed 's/.*Storage bind mounts:[[:space:]]*//')
+        local storage_json="[]"
+        if [ -n "$storage_raw" ] && [ "$storage_raw" != "" ] && [ "$storage_raw" != "none" ]; then
+            storage_json=$(echo "$storage_raw" | tr ' ' '\n' | grep -v '^$' | while read mount; do
+                host_path=$(echo "$mount" | cut -d: -f1)
+                container_path=$(echo "$mount" | cut -d: -f2)
+                echo "{\"host\":\"$host_path\",\"container\":\"$container_path\"}"
+            done | jq -s '.')
+        fi
+
+        # Check PostgreSQL
+        local postgres="false"
+        if ssh "$ssh_alias" "dokku postgres:info $app" &>/dev/null; then
+            postgres="true"
+            echo -e "  PostgreSQL: linked"
+        fi
+
+        # Check Let's Encrypt
+        local letsencrypt="false"
+        if ssh "$ssh_alias" "dokku letsencrypt:active $app" &>/dev/null 2>&1; then
+            letsencrypt="true"
+            echo -e "  Let's Encrypt: active"
+        fi
+
+        # Get deploy branch
+        local branch
+        branch=$(ssh "$ssh_alias" "dokku git:report $app" 2>/dev/null | grep "Git deploy branch:" | awk '{print $NF}')
+        [ -z "$branch" ] && branch="master"
+
+        # Export env vars
+        if [ "$import_secrets" = true ]; then
+            echo -e "  ${BLUE}Exporting env vars...${NC}"
+            local env_vars
+            env_vars=$(ssh "$ssh_alias" "dokku config:export $app" 2>/dev/null || true)
+            if [ -n "$env_vars" ]; then
+                echo "$env_vars" > "$SCRIPT_DIR/.env.imported/$primary_domain"
+                echo -e "  ${GREEN}Saved to .env.imported/$primary_domain${NC}"
+            fi
+        fi
+
+        # Build extra domains array
+        local extra_domains_json="[]"
+        if [ -n "$extra_domains" ]; then
+            extra_domains_json=$(echo "$extra_domains" | tr ' ' '\n' | grep -v '^$' | jq -R . | jq -s '.')
+        fi
+
+        # Add to config using parent key based on app name
+        # Use the app name (with dashes converted to underscores) as the parent key
+        local parent_key=$(echo "$app" | tr '-' '_')
+
+        # Build deployment config
+        local deployment_config=$(jq -n \
+            --arg domain "$primary_domain" \
+            --arg source_dir "$app" \
+            --arg branch "$branch" \
+            --arg postgres "$postgres" \
+            --arg letsencrypt "$letsencrypt" \
+            --argjson ports "$ports_json" \
+            --argjson storage "$storage_json" \
+            --argjson extra_domains "$extra_domains_json" \
+            '{
+                source_dir: $source_dir,
+                branch: $branch,
+                postgres: ($postgres == "true"),
+                letsencrypt: ($letsencrypt == "true"),
+                ports: (if $ports == [] then null else $ports end),
+                storage_mounts: (if $storage == [] then null else $storage end),
+                extra_domains: (if $extra_domains == [] then null else $extra_domains end),
+                deployments: {
+                    ($domain): {
+                        tags: ["imported"]
+                    }
+                }
+            } | with_entries(select(.value != null))')
+
+        # Add to main config
+        config_json=$(echo "$config_json" | jq --arg key "$parent_key" --argjson config "$deployment_config" '.[$key] = $config')
+
+        echo ""
+    done
+
+    # Write config.imported.json (don't overwrite existing config.json)
+    local config_path="$SCRIPT_DIR/config.imported.json"
+    echo "$config_json" | jq '.' > "$config_path"
+
+    echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}Import complete!${NC}"
+    echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "  Apps cloned to:   ${BLUE}$import_dir/${NC}"
+    echo -e "  Config saved to:  ${BLUE}$config_path${NC}"
+    if [ "$import_secrets" = true ]; then
+        echo -e "  Secrets saved to: ${BLUE}$SCRIPT_DIR/.env.imported/${NC}"
+    fi
+    echo ""
+
+    # Show diff if existing config.json exists
+    if [ -f "$SCRIPT_DIR/config.json" ]; then
+        echo -e "${YELLOW}Existing config.json found. To compare:${NC}"
+        echo "  diff config.json config.imported.json"
+        echo ""
+        echo -e "${YELLOW}To use imported config:${NC}"
+        echo "  mv config.imported.json config.json"
+    else
+        echo -e "${YELLOW}To activate:${NC}"
+        echo "  mv config.imported.json config.json"
+    fi
+    echo ""
+}
+
+# Handle import mode
+if [ "$IMPORT_MODE" = true ]; then
+    if [ -z "$IMPORT_DIR" ]; then
+        echo -e "${RED}Error: --import requires a target directory${NC}"
+        show_help
+        exit 1
+    fi
+    if [ -z "$IMPORT_SSH" ]; then
+        echo -e "${RED}Error: --import requires --ssh <alias>${NC}"
+        show_help
+        exit 1
+    fi
+    import_from_server "$IMPORT_DIR" "$IMPORT_SSH" "$IMPORT_SECRETS"
+    exit 0
+fi
+
+# Check if config file exists (only for non-import mode)
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo -e "${RED}Error: $CONFIG_FILE not found${NC}"
+    echo "Copy config.example.json to config.json and configure your deployments."
+    echo "Or use --import to import from an existing Dokku server."
+    exit 1
+fi
 
 # Get SSH host and alias from config
 SSH_HOST=$(jq -r '.ssh_host' "$CONFIG_FILE")
