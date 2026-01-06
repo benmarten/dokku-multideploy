@@ -641,6 +641,29 @@ apply_config_only() {
         fi
     fi
 
+    # Add extra domains if configured
+    if echo "$deployment" | jq -e '.extra_domains' > /dev/null 2>&1; then
+        local extra_domains=$(echo "$deployment" | jq -r '.extra_domains[]' 2>/dev/null)
+        if [ -n "$extra_domains" ]; then
+            echo -e "${BLUE}Adding extra domains...${NC}"
+            while IFS= read -r extra_domain; do
+                if [ -z "$extra_domain" ]; then
+                    continue
+                fi
+                # Escape special regex chars and match exact domain (space-separated)
+                local escaped_domain="${extra_domain//./\\.}"
+                escaped_domain="${escaped_domain//\*/\\*}"
+                local domain_exists=$(ssh -n $SSH_ALIAS "dokku domains:report $app_name 2>/dev/null | grep -E '(^|[[:space:]])${escaped_domain}([[:space:]]|\$)'" || true)
+                if [ -z "$domain_exists" ]; then
+                    echo -e "${BLUE}   Adding $extra_domain...${NC}"
+                    ssh -n $SSH_ALIAS "dokku domains:add $app_name '$extra_domain'" || true
+                else
+                    echo -e "${GREEN}   $extra_domain already configured${NC}"
+                fi
+            done <<< "$extra_domains"
+        fi
+    fi
+
     # Restart the app to apply changes
     echo -e "${BLUE}Restarting app...${NC}"
     ssh $SSH_ALIAS "dokku ps:restart $app_name"
