@@ -318,6 +318,7 @@ The `APP_NAME` environment variable is available in hooks.
 - `git`
 - `ssh` access to your Dokku server
 - `curl` (for health checks)
+- `xz` (for backup mode - usually pre-installed)
 
 ## SSH Configuration
 
