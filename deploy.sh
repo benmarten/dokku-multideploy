@@ -20,6 +20,13 @@ if ! command -v jq &> /dev/null; then
     exit 1
 fi
 
+# Check for xz (needed for backup mode)
+if ! command -v xz &> /dev/null; then
+    XZ_AVAILABLE=false
+else
+    XZ_AVAILABLE=true
+fi
+
 # Parse options
 DRY_RUN=false
 NO_PROD=false
@@ -30,6 +37,8 @@ IMPORT_MODE=false
 IMPORT_DIR=""
 IMPORT_SECRETS=true
 IMPORT_SSH=""
+BACKUP_MODE=false
+BACKUP_DIR=""
 FILTER_TAGS=()
 SELECTED_DEPLOYMENTS=()
 
@@ -48,6 +57,8 @@ show_help() {
     echo "  --import <dir>      Import all apps from Dokku server to <dir>"
     echo "  --ssh <alias>       SSH alias for Dokku server (use with --import)"
     echo "  --no-secrets        Skip importing env vars (use with --import)"
+    echo "  --backup            Backup PostgreSQL databases and storage mounts"
+    echo "  --backup-dir <dir>  Backup directory (default: ./backups)"
     echo "  --help              Show this help message"
     echo ""
     echo "Examples:"
@@ -64,6 +75,12 @@ show_help() {
     echo "Import from existing Dokku server:"
     echo "  $0 --import ./apps --ssh co     # Clone all apps, generate config.json"
     echo "  $0 --import ./apps --ssh co --no-secrets # Import without env vars"
+    echo ""
+    echo "Backup databases and storage:"
+    echo "  $0 --backup                              # Backup all apps to ./backups"
+    echo "  $0 --backup --backup-dir ~/my-backups   # Backup to custom directory"
+    echo "  $0 --backup --tag production            # Backup only production apps"
+    echo "  $0 --backup api.example.com             # Backup specific app"
     echo ""
 }
 
@@ -105,6 +122,15 @@ while [[ $# -gt 0 ]]; do
         --no-secrets)
             IMPORT_SECRETS=false
             shift
+            ;;
+        --backup)
+            BACKUP_MODE=true
+            BACKUP_DIR="$SCRIPT_DIR/backups"
+            shift
+            ;;
+        --backup-dir)
+            BACKUP_DIR="$2"
+            shift 2
             ;;
         --help|-h)
             show_help
@@ -370,6 +396,109 @@ if [ "$IMPORT_MODE" = true ]; then
     exit 0
 fi
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Backup Mode - Backup PostgreSQL databases and storage mounts
+# ═══════════════════════════════════════════════════════════════════════════════
+
+backup_app() {
+    local deployment=$1
+    local backup_dir=$2
+    local domain=$(echo "$deployment" | jq -r '.domain')
+    local app_name=$(echo "$domain" | tr '.' '-')
+    local has_backup=false
+
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}Backing up: $domain${NC}"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+    # Check if app exists
+    if ! ssh $SSH_ALIAS "dokku apps:exists $app_name" 2>/dev/null; then
+        echo -e "${YELLOW}App $app_name does not exist on Dokku, skipping${NC}"
+        echo ""
+        return 0
+    fi
+
+    # Backup PostgreSQL if linked
+    local db_name="${app_name}-db"
+    if ssh $SSH_ALIAS "dokku postgres:exists $db_name" 2>/dev/null; then
+        echo -e "${BLUE}Backing up PostgreSQL database: $db_name${NC}"
+        local db_backup="$backup_dir/${db_name}.dump.xz"
+
+        if [ "$DRY_RUN" = true ]; then
+            echo -e "${YELLOW}   [DRY RUN] Would backup to $db_backup${NC}"
+        else
+            if ssh $SSH_ALIAS "dokku postgres:export $db_name" 2>/dev/null | xz -9 > "$db_backup"; then
+                local size=$(du -h "$db_backup" | cut -f1)
+                echo -e "${GREEN}   Saved: $db_backup ($size)${NC}"
+                has_backup=true
+            else
+                echo -e "${RED}   Failed to backup database${NC}"
+                rm -f "$db_backup"
+            fi
+        fi
+    fi
+
+    # Backup storage mounts
+    if echo "$deployment" | jq -e '.storage_mounts' > /dev/null 2>&1; then
+        local mount_count=$(echo "$deployment" | jq '.storage_mounts | length')
+        if [ "$mount_count" -gt 0 ]; then
+            echo -e "${BLUE}Backing up storage mounts...${NC}"
+            local mount_index=0
+            for (( i=0; i<mount_count; i++ )); do
+                local mount_entry=$(echo "$deployment" | jq -c ".storage_mounts[$i]")
+                local mount_path=""
+                local should_backup=true
+
+                # Check if it's an object or string
+                if echo "$mount_entry" | jq -e 'type == "object"' > /dev/null 2>&1; then
+                    mount_path=$(echo "$mount_entry" | jq -r '.mount')
+                    should_backup=$(echo "$mount_entry" | jq -r 'if has("backup") then .backup else true end')
+                else
+                    mount_path=$(echo "$mount_entry" | jq -r '.')
+                fi
+
+                [ -z "$mount_path" ] && continue
+                mount_index=$((mount_index + 1))
+
+                # Extract host path (before the colon)
+                local host_path=$(echo "$mount_path" | cut -d: -f1)
+                local storage_backup="$backup_dir/${app_name}-storage-${mount_index}.tar.xz"
+
+                if [ "$should_backup" = "false" ]; then
+                    echo -e "${YELLOW}   Mount: $host_path (backup disabled, skipping)${NC}"
+                    continue
+                fi
+
+                echo -e "${BLUE}   Mount: $host_path${NC}"
+
+                if [ "$DRY_RUN" = true ]; then
+                    echo -e "${YELLOW}   [DRY RUN] Would backup to $storage_backup${NC}"
+                else
+                    # Check if path exists on remote
+                    if ssh $SSH_ALIAS "[ -d '$host_path' ]" 2>/dev/null; then
+                        if ssh $SSH_ALIAS "tar -C '$host_path' -cf - ." 2>/dev/null | xz -9 > "$storage_backup"; then
+                            local size=$(du -h "$storage_backup" | cut -f1)
+                            echo -e "${GREEN}   Saved: $storage_backup ($size)${NC}"
+                            has_backup=true
+                        else
+                            echo -e "${RED}   Failed to backup storage${NC}"
+                            rm -f "$storage_backup"
+                        fi
+                    else
+                        echo -e "${YELLOW}   Path does not exist on server, skipping${NC}"
+                    fi
+                fi
+            done
+        fi
+    fi
+
+    if [ "$has_backup" = false ] && [ "$DRY_RUN" = false ]; then
+        echo -e "${YELLOW}No databases or storage mounts to backup${NC}"
+    fi
+
+    echo ""
+}
+
 # Check if config file exists (only for non-import mode)
 if [ ! -f "$CONFIG_FILE" ]; then
     echo -e "${RED}Error: $CONFIG_FILE not found${NC}"
@@ -533,6 +662,49 @@ for deployment in "${FILTERED_DEPLOYMENTS[@]}"; do
     fi
 done
 echo ""
+
+# Handle backup mode
+if [ "$BACKUP_MODE" = true ]; then
+    # Check xz is available
+    if [ "$XZ_AVAILABLE" = false ]; then
+        echo -e "${RED}Error: xz is required for backup mode but not installed.${NC}"
+        echo "Install with: brew install xz (macOS) or apt install xz-utils (Linux)"
+        exit 1
+    fi
+
+    echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
+    echo -e "${BLUE}   dokku-multideploy - Backup Mode${NC}"
+    echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
+    echo ""
+
+    # Create backup directory with timestamp subfolder
+    BACKUP_TIMESTAMP=$(date +%Y-%m-%d_%H%M%S)
+    BACKUP_DIR="$BACKUP_DIR/$BACKUP_TIMESTAMP"
+    mkdir -p "$BACKUP_DIR"
+    echo -e "${BLUE}Backup directory: $BACKUP_DIR${NC}"
+    echo ""
+
+    if [ "$DRY_RUN" = true ]; then
+        echo -e "${YELLOW}DRY RUN MODE - No actual backups will be created${NC}"
+        echo ""
+    fi
+
+    # Backup each app
+    for deployment in "${FILTERED_DEPLOYMENTS[@]}"; do
+        backup_app "$deployment" "$BACKUP_DIR"
+    done
+
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}Backup complete!${NC}"
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "Files saved to: ${BLUE}$BACKUP_DIR${NC}"
+    if [ "$DRY_RUN" = false ]; then
+        ls -lh "$BACKUP_DIR"/*.xz 2>/dev/null || echo "  (no backups created)"
+    fi
+    echo ""
+    exit 0
+fi
 
 # Confirmation prompt for production deployments
 if [ "$HAS_PRODUCTION" = true ] && [ "$DRY_RUN" = false ] && [ "$YES_TO_ALL" = false ]; then
@@ -928,13 +1100,24 @@ deploy_app() {
 
     # Configure storage mounts if specified
     if echo "$deployment" | jq -e '.storage_mounts' > /dev/null 2>&1; then
-        local mounts=$(echo "$deployment" | jq -r '.storage_mounts[]' 2>/dev/null)
-        if [ -n "$mounts" ]; then
+        local mount_count=$(echo "$deployment" | jq '.storage_mounts | length')
+        if [ "$mount_count" -gt 0 ]; then
             echo -e "${BLUE}Configuring storage mounts...${NC}"
-            while IFS= read -r mount; do
-                echo -e "${BLUE}   Mounting $mount${NC}"
-                ssh $SSH_ALIAS "dokku storage:mount $app_name $mount" || true
-            done <<< "$mounts"
+            for (( i=0; i<mount_count; i++ )); do
+                local mount_entry=$(echo "$deployment" | jq -c ".storage_mounts[$i]")
+                local mount_path=""
+
+                # Check if it's an object or string
+                if echo "$mount_entry" | jq -e 'type == "object"' > /dev/null 2>&1; then
+                    mount_path=$(echo "$mount_entry" | jq -r '.mount')
+                else
+                    mount_path=$(echo "$mount_entry" | jq -r '.')
+                fi
+
+                [ -z "$mount_path" ] && continue
+                echo -e "${BLUE}   Mounting $mount_path${NC}"
+                ssh $SSH_ALIAS "dokku storage:mount $app_name $mount_path" || true
+            done
         fi
     fi
 

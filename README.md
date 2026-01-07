@@ -14,6 +14,7 @@ Deploy multiple applications to a single Dokku server with centralized configura
 - **Let's Encrypt SSL** - Opt-in automatic SSL certificate provisioning
 - **Storage mounts, ports, domains** - Full Dokku configuration support
 - **Server import/migration** - Import all apps from existing server, migrate to new server
+- **Backup** - Backup PostgreSQL databases and storage mounts with xz compression
 
 ## Prerequisites
 
@@ -110,6 +111,10 @@ your-project/
 │   └── api-example-com/
 │       ├── server.crt
 │       └── server.key
+├── backups/                 # Backup files (gitignored)
+│   └── 2026-01-06_143022/   # Timestamped backup folder
+│       ├── api-example-com-db.dump.xz
+│       └── api-example-com-storage-1.tar.xz
 ├── api/                     # Your API source code
 │   ├── Dockerfile
 │   ├── pre-deploy.sh        # Runs before deploy (e.g., migrations)
@@ -170,7 +175,7 @@ your-project/
 | `letsencrypt` | Auto-provision Let's Encrypt SSL (`true`/`false`) |
 | `env_vars` | Environment variables (set at runtime) |
 | `build_args` | Docker build arguments (set at build time) |
-| `storage_mounts` | Array of storage mounts (`"host:container"`) |
+| `storage_mounts` | Array of storage mounts - string `"host:container"` or object `{"mount": "host:container", "backup": false}` |
 | `ports` | Array of port mappings (`"http:80:3000"`) |
 | `extra_domains` | Additional domains to add |
 | `plugins` | Dokku plugins to install |
@@ -228,6 +233,45 @@ DATABASE_PASSWORD=production-secret
 # Skip confirmation prompts
 ./deploy.sh --yes
 ```
+
+## Backup
+
+Backup PostgreSQL databases and storage mounts to compressed `.xz` files:
+
+```bash
+# Backup all apps
+./deploy.sh --backup
+
+# Backup to custom directory
+./deploy.sh --backup --backup-dir ~/dokku-backups
+
+# Backup specific app
+./deploy.sh --backup api.example.com
+
+# Backup by tag
+./deploy.sh --backup --tag production
+
+# Dry run (see what would be backed up)
+./deploy.sh --backup --dry-run
+```
+
+This creates timestamped backup folders:
+```
+./backups/2026-01-06_143022/
+├── api-example-com-db.dump.xz       # PostgreSQL dump (pg_dump custom format)
+└── api-example-com-storage-1.tar.xz # Storage mount contents
+```
+
+To restore:
+```bash
+# PostgreSQL
+xzcat backups/2026-01-06_143022/api-example-com-db.dump.xz | ssh dokku "dokku postgres:import api-example-com-db"
+
+# Storage
+xzcat backups/2026-01-06_143022/api-example-com-storage-1.tar.xz | ssh dokku "tar -C /var/lib/dokku/data/storage/api-example-com -xf -"
+```
+
+Backups are saved to `./backups/<timestamp>/` by default (gitignored).
 
 ## Deploy Hooks
 
