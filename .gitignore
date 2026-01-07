@@ -22,3 +22,7 @@ backups/
 *~
 .idea/
 .vscode/
+
+.claude
+
+
