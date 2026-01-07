@@ -21,14 +21,14 @@ Deploy multiple applications to a single Dokku server with centralized configura
 Configure your Dokku server in `~/.ssh/config`:
 
 ```
-Host dokku
-  HostName your-server-ip
+Host <ssh-alias>
+  HostName <your-server-ip>
   User root
-  IdentityFile ~/.ssh/id_rsa
+  IdentityFile ~/.ssh/<your-key>
   IdentitiesOnly yes
 ```
 
-Then use `dokku` as the `ssh_alias` in your config.json.
+Then use `<ssh-alias>` as the `ssh_alias` in your config.json.
 
 ## Quick Start
 
@@ -39,7 +39,7 @@ Then use `dokku` as the `ssh_alias` in your config.json.
 git clone https://github.com/benmarten/dokku-multideploy.git
 
 # 2. Import all apps from your existing server to a separate directory
-./dokku-multideploy/deploy.sh --import ./apps --ssh your-ssh-alias
+./dokku-multideploy/deploy.sh --import ./apps --ssh <ssh-alias>
 
 # 3. Backup databases and storage mounts
 cd apps
@@ -54,8 +54,8 @@ ln -s ../dokku-multideploy/deploy.sh .
 ./deploy.sh
 
 # 6. Restore backups on new server (if needed)
-xzcat backups/*/myapp-db.dump.xz | ssh new-server "dokku postgres:import myapp-db"
-xzcat backups/*/myapp-storage-1.tar.xz | ssh new-server "tar -C /var/lib/dokku/data/storage/myapp -xf -"
+xzcat backups/*/<app>-db.dump.xz | ssh <new-server> "dokku postgres:import <app>-db"
+xzcat backups/*/<app>-storage-1.tar.xz | ssh <new-server> "tar -C /var/lib/dokku/data/storage/<app> -xf -"
 ```
 
 ### Fresh setup
@@ -63,9 +63,9 @@ xzcat backups/*/myapp-storage-1.tar.xz | ssh new-server "tar -C /var/lib/dokku/d
 ```bash
 # 1. Clone and set up your project
 git clone https://github.com/benmarten/dokku-multideploy.git
-cd your-project
-ln -s /path/to/dokku-multideploy/deploy.sh .
-cp /path/to/dokku-multideploy/config.example.json config.json
+cd <your-project>
+ln -s <path-to>/dokku-multideploy/deploy.sh .
+cp <path-to>/dokku-multideploy/config.example.json config.json
 # Edit config.json with your apps
 
 # 2. Add secrets (optional)
@@ -82,10 +82,10 @@ Already have apps running on a Dokku server? Import everything:
 
 ```bash
 # Import all apps from your Dokku server
-./deploy.sh --import ./apps --ssh your-ssh-alias
+./deploy.sh --import ./apps --ssh <ssh-alias>
 
 # Import without secrets (env vars)
-./deploy.sh --import ./apps --ssh your-ssh-alias --no-secrets
+./deploy.sh --import ./apps --ssh <ssh-alias> --no-secrets
 ```
 
 This will:
@@ -96,7 +96,7 @@ This will:
 Then symlink deploy.sh and you're ready:
 ```bash
 cd ./apps
-ln -s /path/to/dokku-multideploy/deploy.sh .
+ln -s <path-to>/dokku-multideploy/deploy.sh .
 ./deploy.sh --dry-run
 ```
 
@@ -106,13 +106,13 @@ Migrate all apps to a new server:
 
 ```bash
 # 1. Import from current server (if not already done)
-./deploy.sh --import ./apps --ssh old-server
+./deploy.sh --import ./apps --ssh <old-server>
 
 # 2. Set up new server with Dokku
-ssh new-server "wget -NP . https://dokku.com/install/v0.34.4/bootstrap.sh && sudo bash bootstrap.sh"
+ssh <new-server> "wget -NP . https://dokku.com/install/v0.34.4/bootstrap.sh && sudo bash bootstrap.sh"
 
 # 3. Update SSH config for new server
-#    Edit ~/.ssh/config to add new-server alias
+#    Edit ~/.ssh/config to add <new-server> alias
 
 # 4. Update config.json
 #    Change ssh_host and ssh_alias to new server
@@ -155,8 +155,8 @@ your-project/
 
 ```json
 {
-  "ssh_host": "dokku@your-server.com",
-  "ssh_alias": "dokku",
+  "ssh_host": "dokku@<your-server-ip>",
+  "ssh_alias": "<ssh-alias>",
 
   "api": {
     "source_dir": "api",
@@ -291,10 +291,10 @@ This creates timestamped backup folders:
 To restore:
 ```bash
 # PostgreSQL
-xzcat backups/2026-01-06_143022/api-example-com-db.dump.xz | ssh dokku "dokku postgres:import api-example-com-db"
+xzcat backups/<timestamp>/<app>-db.dump.xz | ssh <ssh-alias> "dokku postgres:import <app>-db"
 
 # Storage
-xzcat backups/2026-01-06_143022/api-example-com-storage-1.tar.xz | ssh dokku "tar -C /var/lib/dokku/data/storage/api-example-com -xf -"
+xzcat backups/<timestamp>/<app>-storage-1.tar.xz | ssh <ssh-alias> "tar -C /var/lib/dokku/data/storage/<app> -xf -"
 ```
 
 Backups are saved to `./backups/<timestamp>/` by default (gitignored).
@@ -351,13 +351,13 @@ The `APP_NAME` environment variable is available in hooks.
 Add to `~/.ssh/config`:
 
 ```
-Host dokku
-    HostName your-server.com
+Host <ssh-alias>
+    HostName <your-server-ip>
     User dokku
-    IdentityFile ~/.ssh/your-key
+    IdentityFile ~/.ssh/<your-key>
 ```
 
-Then set `"ssh_alias": "dokku"` in config.json.
+Then set `"ssh_alias": "<ssh-alias>"` in config.json.
 
 ## License
 
