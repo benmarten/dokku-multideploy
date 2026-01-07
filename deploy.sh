@@ -701,6 +701,11 @@ if [ "$BACKUP_MODE" = true ]; then
     echo -e "Files saved to: ${BLUE}$BACKUP_DIR${NC}"
     if [ "$DRY_RUN" = false ]; then
         ls -lh "$BACKUP_DIR"/*.xz 2>/dev/null || echo "  (no backups created)"
+        echo ""
+        local total_size=$(du -sh "$BACKUP_DIR" 2>/dev/null | cut -f1)
+        if [ -n "$total_size" ]; then
+            echo -e "Total backup size: ${GREEN}$total_size${NC} (xz -9 compressed)"
+        fi
     fi
     echo ""
     exit 0
