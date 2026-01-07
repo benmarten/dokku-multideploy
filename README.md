@@ -32,21 +32,48 @@ Then use `dokku` as the `ssh_alias` in your config.json.
 
 ## Quick Start
 
+### Migrate existing Dokku server (most common)
+
 ```bash
 # 1. Clone this repo
 git clone https://github.com/benmarten/dokku-multideploy.git
+cd dokku-multideploy
 
-# 2. Set up your project (symlink into your project directory)
+# 2. Import all apps from your existing server
+./deploy.sh --import ./apps --ssh your-ssh-alias
+
+# 3. Backup databases and storage mounts
+cd apps
+ln -s ../deploy.sh .
+./deploy.sh --backup
+
+# 4. Update config.json with new server details
+#    Change ssh_host and ssh_alias to new server
+
+# 5. Deploy everything to new server
+./deploy.sh --dry-run  # Preview first
+./deploy.sh
+
+# 6. Restore backups on new server (if needed)
+xzcat backups/*/myapp-db.dump.xz | ssh new-server "dokku postgres:import myapp-db"
+xzcat backups/*/myapp-storage-1.tar.xz | ssh new-server "tar -C /var/lib/dokku/data/storage/myapp -xf -"
+```
+
+### Fresh setup
+
+```bash
+# 1. Clone and set up your project
+git clone https://github.com/benmarten/dokku-multideploy.git
 cd your-project
 ln -s /path/to/dokku-multideploy/deploy.sh .
 cp /path/to/dokku-multideploy/config.example.json config.json
 # Edit config.json with your apps
 
-# 3. Add secrets (optional)
+# 2. Add secrets (optional)
 mkdir -p .env
 echo "DATABASE_PASSWORD=secret" > .env/api.example.com
 
-# 4. Deploy!
+# 3. Deploy!
 ./deploy.sh
 ```
 
