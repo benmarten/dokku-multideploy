@@ -37,14 +37,13 @@ Then use `dokku` as the `ssh_alias` in your config.json.
 ```bash
 # 1. Clone this repo
 git clone https://github.com/benmarten/dokku-multideploy.git
-cd dokku-multideploy
 
-# 2. Import all apps from your existing server
-./deploy.sh --import ./apps --ssh your-ssh-alias
+# 2. Import all apps from your existing server to a separate directory
+./dokku-multideploy/deploy.sh --import ./my-apps --ssh your-ssh-alias
 
 # 3. Backup databases and storage mounts
-cd apps
-ln -s ../deploy.sh .
+cd my-apps
+ln -s ../dokku-multideploy/deploy.sh .
 ./deploy.sh --backup
 
 # 4. Update config.json with new server details
