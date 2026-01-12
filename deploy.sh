@@ -1190,7 +1190,8 @@ deploy_app() {
         while IFS= read -r line; do
             [[ -z "$line" ]] && continue
             # Each line is already "key=value" format from jq
-            ssh $SSH_ALIAS "dokku docker-options:add $app_name build --build-arg $(printf '%q' "$line")" || true
+            # Use ssh -n to prevent SSH from consuming stdin
+            ssh -n $SSH_ALIAS "dokku docker-options:add $app_name build '--build-arg $line'" || true
         done < <(echo "$deployment" | jq -r '.build_args | to_entries[] | "\(.key)=\(.value)"')
 
         # Also load secrets from .env files as build args (shared first, then domain-specific)
@@ -1212,7 +1213,7 @@ deploy_app() {
                         fi
 
                         # Add this build arg individually - properly quoted
-                        ssh $SSH_ALIAS "dokku docker-options:add $app_name build --build-arg $(printf '%q' "${key}=${value}")" || true
+                        ssh -n $SSH_ALIAS "dokku docker-options:add $app_name build '--build-arg ${key}=${value}'" || true
                     fi
                 done < "$file"
             fi
