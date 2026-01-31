@@ -39,6 +39,8 @@ IMPORT_SECRETS=true
 IMPORT_SSH=""
 BACKUP_MODE=false
 BACKUP_DIR=""
+SETUP_MODE=false
+SETUP_EMAIL=""
 FILTER_TAGS=()
 SELECTED_DEPLOYMENTS=()
 
@@ -59,6 +61,8 @@ show_help() {
     echo "  --no-secrets        Skip importing env vars (use with --import)"
     echo "  --backup            Backup PostgreSQL databases and storage mounts"
     echo "  --backup-dir <dir>  Backup directory (default: ./backups)"
+    echo "  --setup             Setup a fresh Dokku server (install plugins, configure)"
+    echo "  --email <email>     Let's Encrypt email (use with --setup)"
     echo "  --help              Show this help message"
     echo ""
     echo "Examples:"
@@ -81,6 +85,11 @@ show_help() {
     echo "  $0 --backup --backup-dir ~/my-backups   # Backup to custom directory"
     echo "  $0 --backup --tag production            # Backup only production apps"
     echo "  $0 --backup api.example.com             # Backup specific app"
+    echo ""
+    echo "Setup a fresh Dokku server:"
+    echo "  $0 --setup --email admin@example.com   # Setup server from config.json"
+    echo "  $0 --setup --ssh co-new --email a@b.c  # Setup specific server"
+    echo "  $0 --setup                              # Interactive setup (prompts for email)"
     echo ""
 }
 
@@ -130,6 +139,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --backup-dir)
             BACKUP_DIR="$2"
+            shift 2
+            ;;
+        --setup)
+            SETUP_MODE=true
+            shift
+            ;;
+        --email)
+            SETUP_EMAIL="$2"
             shift 2
             ;;
         --help|-h)
@@ -397,6 +414,121 @@ if [ "$IMPORT_MODE" = true ]; then
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Setup Mode - Setup a fresh Dokku server with required plugins
+# ═══════════════════════════════════════════════════════════════════════════════
+
+setup_server() {
+    local ssh_alias="$1"
+    local letsencrypt_email="$2"
+
+    echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
+    echo -e "${BLUE}   dokku-multideploy - Server Setup${NC}"
+    echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
+    echo ""
+
+    # Check SSH connectivity first
+    echo -e "${BLUE}Checking SSH connectivity to $ssh_alias...${NC}"
+    if ! ssh -o ConnectTimeout=10 "$ssh_alias" "echo 'Connection OK'" &>/dev/null; then
+        echo -e "${RED}Cannot connect to $ssh_alias${NC}"
+        echo -e "${RED}Please check your SSH configuration${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}Connected${NC}"
+    echo ""
+
+    # Check if Dokku is installed
+    echo -e "${BLUE}Checking if Dokku is installed...${NC}"
+    if ssh "$ssh_alias" "command -v dokku" &>/dev/null; then
+        local dokku_version=$(ssh "$ssh_alias" "dokku version" 2>/dev/null || echo "unknown")
+        echo -e "${GREEN}Dokku is installed (version: $dokku_version)${NC}"
+    else
+        echo -e "${YELLOW}Dokku is not installed${NC}"
+        echo ""
+        read -p "Install Dokku now? (yes/no): " confirm
+        if [ "$confirm" = "yes" ]; then
+            echo -e "${BLUE}Installing Dokku...${NC}"
+            echo -e "${YELLOW}This may take a few minutes...${NC}"
+            ssh "$ssh_alias" "wget -NP . https://dokku.com/bootstrap.sh && sudo DOKKU_TAG=v0.35.16 bash bootstrap.sh"
+            echo -e "${GREEN}Dokku installed${NC}"
+        else
+            echo -e "${RED}Dokku is required. Exiting.${NC}"
+            exit 1
+        fi
+    fi
+    echo ""
+
+    # Install/check required plugins
+    echo -e "${BLUE}Checking required plugins...${NC}"
+    echo ""
+
+    # Let's Encrypt plugin (universally needed for SSL)
+    echo -e "${BLUE}  Checking letsencrypt plugin...${NC}"
+    if ssh "$ssh_alias" "dokku plugin:list" 2>/dev/null | grep -q "letsencrypt"; then
+        echo -e "${GREEN}  ✓ letsencrypt already installed${NC}"
+    else
+        echo -e "${YELLOW}  Installing letsencrypt plugin...${NC}"
+        ssh "$ssh_alias" "sudo dokku plugin:install https://github.com/dokku/dokku-letsencrypt.git"
+        echo -e "${GREEN}  ✓ letsencrypt installed${NC}"
+    fi
+    echo ""
+    echo -e "${BLUE}Note: Other plugins (postgres, redis, etc.) are auto-installed when needed${NC}"
+    echo ""
+
+    # Configure Let's Encrypt email
+    echo -e "${BLUE}Configuring Let's Encrypt...${NC}"
+    local current_email=$(ssh "$ssh_alias" "dokku letsencrypt:set --global email 2>/dev/null | grep -oE '[^ ]+@[^ ]+'" || echo "")
+
+    if [ -n "$current_email" ]; then
+        echo -e "${GREEN}Let's Encrypt email already set: $current_email${NC}"
+        if [ -n "$letsencrypt_email" ] && [ "$letsencrypt_email" != "$current_email" ]; then
+            read -p "Update to $letsencrypt_email? (yes/no): " confirm
+            if [ "$confirm" = "yes" ]; then
+                ssh "$ssh_alias" "dokku letsencrypt:set --global email $letsencrypt_email"
+                echo -e "${GREEN}Email updated${NC}"
+            fi
+        fi
+    else
+        if [ -z "$letsencrypt_email" ]; then
+            read -p "Enter Let's Encrypt email address: " letsencrypt_email
+        fi
+        if [ -n "$letsencrypt_email" ]; then
+            ssh "$ssh_alias" "dokku letsencrypt:set --global email $letsencrypt_email"
+            echo -e "${GREEN}Let's Encrypt email configured: $letsencrypt_email${NC}"
+        else
+            echo -e "${YELLOW}Skipped - SSL certificates will need manual email configuration${NC}"
+        fi
+    fi
+    echo ""
+
+    # Show summary
+    echo -e "${GREEN}═══════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}   Setup complete!${NC}"
+    echo -e "${GREEN}═══════════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "Server is ready for deployments. Next steps:"
+    echo -e "  1. Update ${BLUE}config.json${NC} with the new server's SSH alias/host"
+    echo -e "  2. Run ${BLUE}./deploy.sh --dry-run${NC} to preview deployments"
+    echo -e "  3. Deploy a test app: ${BLUE}./deploy.sh csvfilter.e7ad.cc${NC}"
+    echo ""
+}
+
+# Handle setup mode
+if [ "$SETUP_MODE" = true ]; then
+    # Get SSH alias from config or --ssh flag
+    if [ -n "$IMPORT_SSH" ]; then
+        SETUP_SSH="$IMPORT_SSH"
+    elif [ -f "$CONFIG_FILE" ]; then
+        SETUP_SSH=$(jq -r '.ssh_alias // .ssh_host' "$CONFIG_FILE" 2>/dev/null | sed 's/dokku@//')
+    else
+        echo -e "${RED}Error: No SSH target specified${NC}"
+        echo "Use --ssh <alias> or ensure config.json exists with ssh_alias"
+        exit 1
+    fi
+    setup_server "$SETUP_SSH" "$SETUP_EMAIL"
+    exit 0
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Backup Mode - Backup PostgreSQL databases and storage mounts
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -544,8 +676,8 @@ fi
 # Parse hierarchical config and flatten to deployments array
 DEPLOYMENTS=()
 
-# Process each parent type
-for parent_type in $(jq -r 'keys[] | select(. != "ssh_host" and . != "ssh_alias")' "$CONFIG_FILE"); do
+# Process each parent type (only keys whose values are objects with deployments)
+for parent_type in $(jq -r 'to_entries[] | select(.value | type == "object" and has("deployments")) | .key' "$CONFIG_FILE"); do
     # Get parent config
     parent_config=$(jq -c ".[\"${parent_type}\"]" "$CONFIG_FILE")
     parent_source_dir=$(echo "$parent_config" | jq -r '.source_dir // ""')
@@ -1017,12 +1149,19 @@ deploy_app() {
 
     # Create and link Postgres database if enabled
     if [ "$enable_postgres" = "true" ]; then
-        # Check if postgres plugin is installed
+        # Check if postgres plugin is installed, auto-install if not
         if ! ssh $SSH_ALIAS "dokku plugin:list" 2>/dev/null | grep -q "postgres"; then
-            echo -e "${YELLOW}PostgreSQL plugin not installed on Dokku${NC}"
-            echo -e "${YELLOW}Install with: ssh $SSH_ALIAS sudo dokku plugin:install https://github.com/dokku/dokku-postgres.git${NC}"
-            echo -e "${YELLOW}Make sure to set DATABASE_URL manually in .env/$domain${NC}"
-        else
+            echo -e "${YELLOW}PostgreSQL plugin not installed, installing...${NC}"
+            if ssh $SSH_ALIAS "sudo dokku plugin:install https://github.com/dokku/dokku-postgres.git postgres"; then
+                echo -e "${GREEN}PostgreSQL plugin installed${NC}"
+            else
+                echo -e "${RED}Failed to install PostgreSQL plugin${NC}"
+                echo -e "${YELLOW}Make sure to set DATABASE_URL manually in .env/$domain${NC}"
+            fi
+        fi
+
+        # Proceed if plugin is now available
+        if ssh $SSH_ALIAS "dokku plugin:list" 2>/dev/null | grep -q "postgres"; then
             # Check if DATABASE_URL or DB_HOST is already set (from .env files or config)
             local has_database_config=false
 
