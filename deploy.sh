@@ -37,6 +37,7 @@ IMPORT_MODE=false
 IMPORT_DIR=""
 IMPORT_SECRETS=true
 IMPORT_SSH=""
+IMPORT_NO_CLONE=false
 BACKUP_MODE=false
 BACKUP_DIR=""
 SETUP_MODE=false
@@ -59,6 +60,7 @@ show_help() {
     echo "  --import <dir>      Import all apps from Dokku server to <dir>"
     echo "  --ssh <alias>       SSH alias for Dokku server (use with --import)"
     echo "  --no-secrets        Skip importing env vars (use with --import)"
+    echo "  --no-clone          Skip cloning repos, only generate config.json and .env files (use with --import)"
     echo "  --backup            Backup PostgreSQL databases and storage mounts"
     echo "  --backup-dir <dir>  Backup directory (default: ./backups)"
     echo "  --setup             Setup a fresh Dokku server (install plugins, configure)"
@@ -130,6 +132,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-secrets)
             IMPORT_SECRETS=false
+            shift
+            ;;
+        --no-clone)
+            IMPORT_NO_CLONE=true
             shift
             ;;
         --backup)
@@ -225,15 +231,20 @@ import_from_server() {
 
         local app_dir="$import_dir/$app"
 
-        # Clone git repo
-        echo -e "  ${BLUE}Cloning git repo...${NC}"
-        if [ -d "$app_dir" ]; then
-            echo -e "  ${YELLOW}Directory exists, pulling latest...${NC}"
-            git -C "$app_dir" pull --ff-only 2>/dev/null || true
+        # Clone git repo (unless --no-clone)
+        if [ "$IMPORT_NO_CLONE" = true ]; then
+            echo -e "  ${YELLOW}Skipping git clone (--no-clone)${NC}"
+            mkdir -p "$app_dir"
         else
-            if ! git clone "dokku@$ssh_host:$app" "$app_dir" 2>/dev/null; then
-                echo -e "  ${YELLOW}No git repo (app may not have been deployed yet)${NC}"
-                mkdir -p "$app_dir"
+            echo -e "  ${BLUE}Cloning git repo...${NC}"
+            if [ -d "$app_dir" ]; then
+                echo -e "  ${YELLOW}Directory exists, pulling latest...${NC}"
+                git -C "$app_dir" pull --ff-only 2>/dev/null || true
+            else
+                if ! git clone "dokku@$ssh_host:$app" "$app_dir" 2>/dev/null; then
+                    echo -e "  ${YELLOW}No git repo (app may not have been deployed yet)${NC}"
+                    mkdir -p "$app_dir"
+                fi
             fi
         fi
 
@@ -330,11 +341,18 @@ import_from_server() {
         if [ "$import_secrets" = true ]; then
             echo -e "  ${BLUE}Exporting env vars...${NC}"
             local env_vars
-            env_vars=$(ssh "$ssh_alias" "dokku config:export $app" 2>/dev/null || true)
+            # Get env vars, remove 'export ' prefix, filter out Dokku internal vars
+            # Also filter DATABASE_URL as it's auto-set by dokku postgres:link
+            env_vars=$(ssh "$ssh_alias" "dokku config:export $app" 2>/dev/null | \
+                sed 's/^export //' | \
+                grep -v '^DOKKU_\|^GIT_REV=\|^PORT=\|^DATABASE_URL=' || true)
             if [ -n "$env_vars" ]; then
                 echo "$env_vars" > "$env_path/$primary_domain"
                 local env_rel_path="${env_path#$SCRIPT_DIR/}"
-                echo -e "  ${GREEN}Saved to $env_rel_path/$primary_domain${NC}"
+                local var_count=$(echo "$env_vars" | wc -l | tr -d ' ')
+                echo -e "  ${GREEN}Saved $var_count vars to $env_rel_path/$primary_domain${NC}"
+            else
+                echo -e "  ${YELLOW}No env vars to export${NC}"
             fi
         fi
 
@@ -570,57 +588,23 @@ backup_app() {
         fi
     fi
 
-    # Backup storage mounts
-    if echo "$deployment" | jq -e '.storage_mounts' > /dev/null 2>&1; then
-        local mount_count=$(echo "$deployment" | jq '.storage_mounts | length')
-        if [ "$mount_count" -gt 0 ]; then
-            echo -e "${BLUE}Backing up storage mounts...${NC}"
-            local mount_index=0
-            for (( i=0; i<mount_count; i++ )); do
-                local mount_entry=$(echo "$deployment" | jq -c ".storage_mounts[$i]")
-                local mount_path=""
-                local should_backup=true
+    # Backup storage (single archive preserving directory structure)
+    local storage_base="/var/lib/dokku/data/storage/$app_name"
+    if ssh $SSH_ALIAS "[ -d '$storage_base' ]" 2>/dev/null; then
+        echo -e "${BLUE}Backing up storage: $storage_base${NC}"
+        local storage_backup="$backup_dir/${app_name}-storage.tar.xz"
 
-                # Check if it's an object or string
-                if echo "$mount_entry" | jq -e 'type == "object"' > /dev/null 2>&1; then
-                    mount_path=$(echo "$mount_entry" | jq -r '.mount')
-                    should_backup=$(echo "$mount_entry" | jq -r 'if has("backup") then .backup else true end')
-                else
-                    mount_path=$(echo "$mount_entry" | jq -r '.')
-                fi
-
-                [ -z "$mount_path" ] && continue
-                mount_index=$((mount_index + 1))
-
-                # Extract host path (before the colon)
-                local host_path=$(echo "$mount_path" | cut -d: -f1)
-                local storage_backup="$backup_dir/${app_name}-storage-${mount_index}.tar.xz"
-
-                if [ "$should_backup" = "false" ]; then
-                    echo -e "${YELLOW}   Mount: $host_path (backup disabled, skipping)${NC}"
-                    continue
-                fi
-
-                echo -e "${BLUE}   Mount: $host_path${NC}"
-
-                if [ "$DRY_RUN" = true ]; then
-                    echo -e "${YELLOW}   [DRY RUN] Would backup to $storage_backup${NC}"
-                else
-                    # Check if path exists on remote
-                    if ssh $SSH_ALIAS "[ -d '$host_path' ]" 2>/dev/null; then
-                        if ssh $SSH_ALIAS "tar -C '$host_path' -cf - ." 2>/dev/null | xz -9 > "$storage_backup"; then
-                            local size=$(du -h "$storage_backup" | cut -f1)
-                            echo -e "${GREEN}   Saved: $storage_backup ($size)${NC}"
-                            has_backup=true
-                        else
-                            echo -e "${RED}   Failed to backup storage${NC}"
-                            rm -f "$storage_backup"
-                        fi
-                    else
-                        echo -e "${YELLOW}   Path does not exist on server, skipping${NC}"
-                    fi
-                fi
-            done
+        if [ "$DRY_RUN" = true ]; then
+            echo -e "${YELLOW}   [DRY RUN] Would backup to $storage_backup${NC}"
+        else
+            if ssh $SSH_ALIAS "tar -C '$storage_base' -cf - ." 2>/dev/null | xz -9 > "$storage_backup"; then
+                local size=$(du -h "$storage_backup" | cut -f1)
+                echo -e "${GREEN}   Saved: $storage_backup ($size)${NC}"
+                has_backup=true
+            else
+                echo -e "${RED}   Failed to backup storage${NC}"
+                rm -f "$storage_backup"
+            fi
         fi
     fi
 
@@ -639,9 +623,9 @@ if [ ! -f "$CONFIG_FILE" ]; then
     exit 1
 fi
 
-# Get SSH host and alias from config
-SSH_HOST=$(jq -r '.ssh_host' "$CONFIG_FILE")
-SSH_ALIAS=$(jq -r '.ssh_alias // .ssh_host' "$CONFIG_FILE")
+# Get SSH host and alias from config (export for hooks)
+export SSH_HOST=$(jq -r '.ssh_host' "$CONFIG_FILE")
+export SSH_ALIAS=$(jq -r '.ssh_alias // .ssh_host' "$CONFIG_FILE")
 
 echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
 echo -e "${BLUE}   dokku-multideploy${NC}"
@@ -878,9 +862,10 @@ parse_env_file() {
                 value="${BASH_REMATCH[1]}"
             fi
 
-            # Properly escape the value for shell
-            local escaped_value=$(printf '%q' "$value")
-            result="$result ${key}=${escaped_value}"
+            # Escape single quotes in value by replacing ' with '\''
+            # Then wrap in single quotes for safe shell passing through ssh
+            local escaped_value="${value//\'/\'\\\'\'}"
+            result="$result '${key}=${escaped_value}'"
         fi
     done < "$file"
 
@@ -943,8 +928,9 @@ apply_config_only() {
                 [[ -z "$line" ]] && continue
                 local key=$(echo "$line" | jq -r '.key')
                 local value=$(echo "$line" | jq -r '.value')
-                local escaped_value=$(printf '%q' "$value")
-                escaped_vars="$escaped_vars ${key}=${escaped_value}"
+                # Escape single quotes and wrap in single quotes for safe ssh passing
+                local escaped_value="${value//\'/\'\\\'\'}"
+                escaped_vars="$escaped_vars '${key}=${escaped_value}'"
             done < <(echo "$deployment" | jq -c '.env_vars | to_entries[]')
             ssh $SSH_ALIAS "dokku config:set --no-restart $app_name $escaped_vars" || true
         fi
@@ -1311,8 +1297,9 @@ deploy_app() {
                 [[ -z "$line" ]] && continue
                 local key=$(echo "$line" | jq -r '.key')
                 local value=$(echo "$line" | jq -r '.value')
-                local escaped_value=$(printf '%q' "$value")
-                escaped_vars="$escaped_vars ${key}=${escaped_value}"
+                # Escape single quotes and wrap in single quotes for safe ssh passing
+                local escaped_value="${value//\'/\'\\\'\'}"
+                escaped_vars="$escaped_vars '${key}=${escaped_value}'"
             done < <(echo "$deployment" | jq -c '.env_vars | to_entries[]')
             ssh $SSH_ALIAS "dokku config:set --no-restart $app_name $escaped_vars" || true
         fi
@@ -1325,38 +1312,15 @@ deploy_app() {
         # Clear existing build args first
         ssh $SSH_ALIAS "dokku docker-options:clear $app_name build" || true
 
-        # Add build args from config.json
+        # Add build args from config.json only (not .env secrets - those are runtime only)
         while IFS= read -r line; do
             [[ -z "$line" ]] && continue
-            # Each line is already "key=value" format from jq
-            # Use ssh -n to prevent SSH from consuming stdin
-            ssh -n $SSH_ALIAS "dokku docker-options:add $app_name build '--build-arg $line'" || true
-        done < <(echo "$deployment" | jq -r '.build_args | to_entries[] | "\(.key)=\(.value)"')
-
-        # Also load secrets from .env files as build args (shared first, then domain-specific)
-        for file in "$shared_file" "$domain_file"; do
-            if [ -f "$file" ]; then
-                # Parse the file and add each build arg individually
-                while IFS= read -r line || [ -n "$line" ]; do
-                    # Skip empty lines and comments
-                    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
-
-                    # Parse key=value
-                    if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
-                        local key="${BASH_REMATCH[1]}"
-                        local value="${BASH_REMATCH[2]}"
-
-                        # Remove surrounding quotes if present
-                        if [[ "$value" =~ ^\"(.*)\"$ ]] || [[ "$value" =~ ^\'(.*)\'$ ]]; then
-                            value="${BASH_REMATCH[1]}"
-                        fi
-
-                        # Add this build arg individually - properly quoted
-                        ssh -n $SSH_ALIAS "dokku docker-options:add $app_name build '--build-arg ${key}=${value}'" || true
-                    fi
-                done < "$file"
-            fi
-        done
+            local key=$(echo "$line" | jq -r '.key')
+            local value=$(echo "$line" | jq -r '.value')
+            # Escape double quotes in value and wrap in double quotes
+            local escaped_value="${value//\"/\\\"}"
+            ssh -n $SSH_ALIAS "dokku docker-options:add $app_name build '--build-arg ${key}=\"${escaped_value}\"'" || true
+        done < <(echo "$deployment" | jq -c '.build_args | to_entries[]')
     fi
 
     # Change to source directory for git push
@@ -1451,8 +1415,8 @@ deploy_app() {
             echo -e "${YELLOW}Let's Encrypt plugin not installed on Dokku${NC}"
             echo -e "${YELLOW}Install with: ssh $SSH_ALIAS sudo dokku plugin:install https://github.com/dokku/dokku-letsencrypt.git${NC}"
             echo -e "${YELLOW}Then configure: ssh $SSH_ALIAS dokku letsencrypt:set --global email your-email@example.com${NC}"
-        elif ssh $SSH_ALIAS "dokku letsencrypt:list" 2>/dev/null | grep -q "$app_name"; then
-            echo -e "${GREEN}SSL already configured${NC}"
+        elif ssh $SSH_ALIAS "dokku certs:report $app_name" 2>/dev/null | grep -q "Ssl enabled:.*true"; then
+            echo -e "${GREEN}SSL already enabled${NC}"
         else
             echo -e "${BLUE}Enabling Let's Encrypt SSL certificate...${NC}"
             local ssl_output

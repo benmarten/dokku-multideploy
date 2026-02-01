@@ -131,7 +131,8 @@ for dump_file in "$BACKUP_DIR"/*.dump.xz "$BACKUP_DIR"/*.dump; do
     fi
 
     # Create database if it doesn't exist
-    if ssh "$SSH_HOST" "dokku postgres:exists $db_name" &>/dev/null; then
+    db_exists=$(ssh "$SSH_HOST" "dokku postgres:exists $db_name && echo yes || echo no" 2>/dev/null)
+    if [[ "$db_exists" == *"yes"* ]]; then
         log_info "Database $db_name already exists, importing data..."
     else
         log_info "Creating database: $db_name"
@@ -161,17 +162,23 @@ for storage_file in "$BACKUP_DIR"/*.tar.xz "$BACKUP_DIR"/*.tar.gz "$BACKUP_DIR"/
 
     filename=$(basename "$storage_file")
 
-    # Extract app name and storage number from filename
-    # Format: app-name-storage-N.tar.xz
-    if [[ "$filename" =~ ^(.+)-storage-([0-9]+)\.tar ]]; then
+    # Extract app name from filename
+    # New format: app-name-storage.tar.xz (single backup, preserves structure)
+    # Old format: app-name-storage-N.tar.xz (multiple backups, no structure)
+    if [[ "$filename" =~ ^(.+)-storage\.tar ]]; then
         app_name="${BASH_REMATCH[1]}"
-        storage_num="${BASH_REMATCH[2]}"
+        is_old_format=false
+    elif [[ "$filename" =~ ^(.+)-storage-([0-9]+)\.tar ]]; then
+        app_name="${BASH_REMATCH[1]}"
+        is_old_format=true
+        log_warn "Old backup format detected: $filename"
+        log_warn "Files may not restore to correct mount paths"
     else
         log_warn "Unknown storage format: $filename, skipping..."
         continue
     fi
 
-    log_info "Found storage backup: $filename -> app: $app_name, volume: $storage_num"
+    log_info "Found storage backup: $filename -> app: $app_name"
 
     # Determine storage path on remote
     storage_path="/var/lib/dokku/data/storage/$app_name"
@@ -180,23 +187,23 @@ for storage_file in "$BACKUP_DIR"/*.tar.xz "$BACKUP_DIR"/*.tar.gz "$BACKUP_DIR"/
     log_info "Ensuring storage directory exists: $storage_path"
     run_ssh "mkdir -p $storage_path"
 
-    # Extract archive
+    # Extract archive (no strip-components, preserves directory structure)
     log_info "Extracting storage to $storage_path..."
     if [[ "$DRY_RUN" != "true" ]]; then
         if [[ "$storage_file" == *.xz ]]; then
-            xz -dkc "$storage_file" | ssh "$SSH_HOST" "tar -xf - -C $storage_path --strip-components=1"
+            xz -dkc "$storage_file" | ssh "$SSH_HOST" "tar -xf - -C $storage_path"
         elif [[ "$storage_file" == *.gz ]]; then
-            gzip -dkc "$storage_file" | ssh "$SSH_HOST" "tar -xf - -C $storage_path --strip-components=1"
+            gzip -dkc "$storage_file" | ssh "$SSH_HOST" "tar -xf - -C $storage_path"
         else
-            cat "$storage_file" | ssh "$SSH_HOST" "tar -xf - -C $storage_path --strip-components=1"
+            cat "$storage_file" | ssh "$SSH_HOST" "tar -xf - -C $storage_path"
         fi
     else
-        echo -e "${YELLOW}[DRY-RUN]${NC} xz -dkc $storage_file | ssh $SSH_HOST \"tar -xf - -C $storage_path --strip-components=1\""
+        echo -e "${YELLOW}[DRY-RUN]${NC} xz -dkc $storage_file | ssh $SSH_HOST \"tar -xf - -C $storage_path\""
     fi
 
     # Fix permissions
     log_info "Fixing permissions for $storage_path..."
-    run_ssh "chown -R 32767:32767 $storage_path"
+    run_ssh "chown -R dokku:dokku $storage_path"
 
     log_info "Storage for $app_name restored successfully"
 done
@@ -205,7 +212,8 @@ print_header "Restore Complete"
 
 log_info "Summary:"
 log_info "  - Databases and storage volumes have been restored"
-log_info "  - You still need to:"
-log_info "    1. Deploy apps using: CONFIG_FILE=config2.json ./deploy.sh"
-log_info "    2. Link databases to apps: dokku postgres:link <db> <app>"
-log_info "    3. Mount storage to apps: dokku storage:mount <app> <host-path>:<container-path>"
+log_info ""
+log_info "Next step: Deploy apps"
+log_info "  CONFIG_FILE=<config> ./deploy.sh"
+log_info ""
+log_info "The deploy script will automatically link databases and mount storage."
