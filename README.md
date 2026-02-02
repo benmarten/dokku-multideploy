@@ -14,7 +14,7 @@ Deploy multiple applications to a single Dokku server with centralized configura
 - **Let's Encrypt SSL** - Opt-in automatic SSL certificate provisioning
 - **Storage mounts, ports, domains** - Full Dokku configuration support
 - **Server import/migration** - Import all apps from existing server, migrate to new server
-- **Backup** - Backup PostgreSQL databases and storage mounts with xz compression
+- **Backup & Restore** - Backup/restore PostgreSQL databases and storage mounts with xz compression
 
 ## Prerequisites
 
@@ -53,9 +53,8 @@ ln -s ../dokku-multideploy/deploy.sh .
 ./deploy.sh --dry-run  # Preview first
 ./deploy.sh
 
-# 6. Restore backups on new server (if needed)
-xzcat backups/*/<app>-db.dump.xz | ssh <new-server> "dokku postgres:import <app>-db"
-xzcat backups/*/<app>-storage-1.tar.xz | ssh <new-server> "tar -C /var/lib/dokku/data/storage/<app> -xf -"
+# 6. Restore backups on new server
+SSH_HOST=<new-server> ./restore.sh backups/<timestamp>
 ```
 
 ### Fresh setup
@@ -127,7 +126,8 @@ The script will create all apps, configure domains, env vars, storage mounts, po
 
 ```
 your-project/
-├── deploy.sh              # Main deployment script
+├── deploy.sh              # Symlink to dokku-multideploy/deploy.sh
+├── restore.sh             # Symlink to dokku-multideploy/restore.sh
 ├── config.json              # Your deployment configuration
 ├── .env/                    # Secret environment variables (gitignored)
 │   ├── _api                 # Shared secrets for all "api" source_dir apps
@@ -288,16 +288,37 @@ This creates timestamped backup folders:
 └── api-example-com-storage-1.tar.xz # Storage mount contents
 ```
 
-To restore:
-```bash
-# PostgreSQL
-xzcat backups/<timestamp>/<app>-db.dump.xz | ssh <ssh-alias> "dokku postgres:import <app>-db"
+Backups are saved to `./backups/<timestamp>/` by default (gitignored).
 
-# Storage
-xzcat backups/<timestamp>/<app>-storage-1.tar.xz | ssh <ssh-alias> "tar -C /var/lib/dokku/data/storage/<app> -xf -"
+## Restore
+
+Restore PostgreSQL databases and storage mounts from a backup:
+
+```bash
+# Restore to default server (from config.json ssh_alias)
+./restore.sh backups/2026-01-31_085506
+
+# Restore to specific server
+SSH_HOST=co2 ./restore.sh backups/2026-01-31_085506
+
+# Dry run (see what would be restored)
+./restore.sh backups/2026-01-31_085506 --dry-run
 ```
 
-Backups are saved to `./backups/<timestamp>/` by default (gitignored).
+The restore script will:
+1. Install postgres plugin if needed
+2. Create databases if they don't exist, or import into existing ones
+3. Extract storage archives to `/var/lib/dokku/data/storage/<app>/`
+4. Fix permissions for Dokku
+
+**Workflow for server migration:**
+```bash
+# 1. Deploy apps to new server (creates apps, empty DBs, storage mounts)
+CONFIG_FILE=config-newserver.json ./deploy.sh
+
+# 2. Restore data from backup
+SSH_HOST=newserver ./restore.sh backups/2026-01-31_085506
+```
 
 ## Deploy Hooks
 
