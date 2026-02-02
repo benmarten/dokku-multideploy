@@ -317,6 +317,17 @@ import_from_server() {
             done | jq -s '.')
         fi
 
+        # Get docker options (capture -p port mappings from deploy phase)
+        local docker_opts_raw
+        docker_opts_raw=$(ssh "$ssh_alias" "dokku docker-options:report $app" 2>/dev/null | grep "Docker options deploy:" | sed 's/.*Docker options deploy:[[:space:]]*//')
+        local docker_options_json="[]"
+        if [ -n "$docker_opts_raw" ] && [ "$docker_opts_raw" != "" ]; then
+            # Extract -p port:port mappings (not -v volume mounts, those are handled by storage)
+            docker_options_json=$(echo "$docker_opts_raw" | grep -oE '\-p [0-9]+:[0-9]+' | while read opt; do
+                echo "\"$opt\""
+            done | jq -s '.')
+        fi
+
         # Check PostgreSQL
         local postgres="false"
         if ssh "$ssh_alias" "dokku postgres:info $app" &>/dev/null; then
@@ -375,6 +386,7 @@ import_from_server() {
             --arg letsencrypt "$letsencrypt" \
             --argjson ports "$ports_json" \
             --argjson storage "$storage_json" \
+            --argjson docker_options "$docker_options_json" \
             --argjson extra_domains "$extra_domains_json" \
             '{
                 source_dir: $source_dir,
@@ -383,6 +395,7 @@ import_from_server() {
                 letsencrypt: (if $letsencrypt == "true" then true else null end),
                 ports: (if $ports == [] then null else $ports end),
                 storage_mounts: (if $storage == [] then null else $storage end),
+                docker_options: (if $docker_options == [] then null else $docker_options end),
                 extra_domains: (if $extra_domains == [] then null else $extra_domains end),
                 deployments: {
                     ($domain): {}
@@ -670,6 +683,7 @@ for parent_type in $(jq -r 'to_entries[] | select(.value | type == "object" and 
     parent_build_args=$(echo "$parent_config" | jq -c '.build_args // {}')
     parent_storage_mounts=$(echo "$parent_config" | jq -c '.storage_mounts // []')
     parent_ports=$(echo "$parent_config" | jq -c '.ports // []')
+    parent_docker_options=$(echo "$parent_config" | jq -c '.docker_options // []')
     parent_extra_domains=$(echo "$parent_config" | jq -c '.extra_domains // []')
     parent_plugins=$(echo "$parent_config" | jq -c '.plugins // []')
     parent_postgres=$(echo "$parent_config" | jq -r '.postgres // false')
@@ -690,6 +704,7 @@ for parent_type in $(jq -r 'to_entries[] | select(.value | type == "object" and 
             --argjson parent_build_args "$parent_build_args" \
             --argjson parent_storage_mounts "$parent_storage_mounts" \
             --argjson parent_ports "$parent_ports" \
+            --argjson parent_docker_options "$parent_docker_options" \
             --argjson parent_extra_domains "$parent_extra_domains" \
             --argjson parent_plugins "$parent_plugins" \
             --argjson child "$child_config" \
@@ -704,6 +719,7 @@ for parent_type in $(jq -r 'to_entries[] | select(.value | type == "object" and 
                 build_args: ($parent_build_args + ($child.build_args // {})),
                 storage_mounts: (($child.storage_mounts // []) + $parent_storage_mounts),
                 ports: (($child.ports // $parent_ports) // []),
+                docker_options: (($child.docker_options // []) + $parent_docker_options),
                 extra_domains: (($child.extra_domains // []) + $parent_extra_domains),
                 plugins: (($child.plugins // []) + $parent_plugins)
             }')
@@ -1259,6 +1275,16 @@ deploy_app() {
             echo -e "${BLUE}   Ports: $ports${NC}"
             ssh $SSH_ALIAS "dokku ports:set $app_name $ports" || true
         fi
+    fi
+
+    # Configure docker options (e.g., -p port:port for non-HTTP ports)
+    if echo "$deployment" | jq -e '.docker_options | length > 0' > /dev/null 2>&1; then
+        echo -e "${BLUE}Configuring docker options...${NC}"
+        while IFS= read -r opt; do
+            [ -z "$opt" ] && continue
+            echo -e "${BLUE}   Adding: $opt${NC}"
+            ssh $SSH_ALIAS "dokku docker-options:add $app_name deploy '$opt'" || true
+        done < <(echo "$deployment" | jq -r '.docker_options[]')
     fi
 
     # Load secrets hierarchically: shared file first, then domain-specific
