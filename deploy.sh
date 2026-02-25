@@ -40,6 +40,8 @@ IMPORT_SSH=""
 IMPORT_NO_CLONE=false
 BACKUP_MODE=false
 BACKUP_DIR=""
+RESTORE_MODE=false
+RESTORE_DIR=""
 SETUP_MODE=false
 SETUP_EMAIL=""
 FILTER_TAGS=()
@@ -61,7 +63,8 @@ show_help() {
     echo "  --ssh <alias>       SSH alias for Dokku server (use with --import)"
     echo "  --no-secrets        Skip importing env vars (use with --import)"
     echo "  --no-clone          Skip cloning repos, only generate config.json and .env files (use with --import)"
-    echo "  --backup            Backup PostgreSQL databases and storage mounts"
+    echo "  --backup            Backup PostgreSQL/MySQL databases and storage mounts"
+    echo "  --restore <dir>     Restore PostgreSQL/MySQL databases and storage from backup dir"
     echo "  --backup-dir <dir>  Backup directory (default: ./backups)"
     echo "  --setup             Setup a fresh Dokku server (install plugins, configure)"
     echo "  --email <email>     Let's Encrypt email (use with --setup)"
@@ -87,6 +90,7 @@ show_help() {
     echo "  $0 --backup --backup-dir ~/my-backups   # Backup to custom directory"
     echo "  $0 --backup --tag production            # Backup only production apps"
     echo "  $0 --backup api.example.com             # Backup specific app"
+    echo "  $0 --restore ./backups/2026-02-25_125435 # Restore from backup directory"
     echo ""
     echo "Setup a fresh Dokku server:"
     echo "  $0 --setup --email admin@example.com   # Setup server from config.json"
@@ -143,6 +147,16 @@ while [[ $# -gt 0 ]]; do
             BACKUP_DIR="$SCRIPT_DIR/backups"
             shift
             ;;
+        --restore)
+            if [ $# -lt 2 ] || [[ "$2" == -* ]]; then
+                echo -e "${RED}Error: --restore requires a directory argument${NC}"
+                echo "Example: $0 --restore ./backups/2026-02-25_125435"
+                exit 1
+            fi
+            RESTORE_MODE=true
+            RESTORE_DIR="$2"
+            shift 2
+            ;;
         --backup-dir)
             BACKUP_DIR="$2"
             shift 2
@@ -195,11 +209,11 @@ import_from_server() {
     echo ""
 
     # Get SSH host for git clone (dokku@host format)
+    # Prefer ssh config hostname (public/reachable), then fallback to SSH_CONNECTION.
     local ssh_host
-    ssh_host=$(ssh "$ssh_alias" "echo \$SSH_CONNECTION" | awk '{print $3}')
+    ssh_host=$(ssh -G "$ssh_alias" 2>/dev/null | awk '/^hostname / {print $2; exit}')
     if [ -z "$ssh_host" ]; then
-        # Fallback: try to get from ssh config
-        ssh_host=$(ssh -G "$ssh_alias" | grep "^hostname " | awk '{print $2}')
+        ssh_host=$(ssh "$ssh_alias" "echo \$SSH_CONNECTION" | awk '{print $3}')
     fi
     echo -e "${BLUE}Dokku host: $ssh_host${NC}"
 
@@ -560,8 +574,102 @@ if [ "$SETUP_MODE" = true ]; then
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Backup Mode - Backup PostgreSQL databases and storage mounts
+# Backup Mode - Backup PostgreSQL/MySQL databases and storage mounts
 # ═══════════════════════════════════════════════════════════════════════════════
+
+backup_mysql_services() {
+    local backup_dir=$1
+    local has_mysql=false
+
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}Backing up MySQL services${NC}"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+    local services
+    services=$(ssh $SSH_ALIAS "dokku mysql:list 2>/dev/null | tail -n +2" 2>/dev/null | sed '/^[[:space:]]*$/d' || true)
+
+    if [ -z "$services" ]; then
+        echo -e "${YELLOW}No MySQL services found${NC}"
+        echo ""
+        return 0
+    fi
+
+    while IFS= read -r service; do
+        [ -z "$service" ] && continue
+        has_mysql=true
+        local mysql_backup="$backup_dir/${service}.sql.xz"
+        echo -e "${BLUE}Backing up MySQL database: $service${NC}"
+
+        if [ "$DRY_RUN" = true ]; then
+            echo -e "${YELLOW}   [DRY RUN] Would backup to $mysql_backup${NC}"
+        else
+            if ssh $SSH_ALIAS "dokku mysql:export $service" 2>/dev/null | xz -9 > "$mysql_backup"; then
+                local size=$(du -h "$mysql_backup" | cut -f1)
+                echo -e "${GREEN}   Saved: $mysql_backup ($size)${NC}"
+            else
+                echo -e "${RED}   Failed to backup MySQL service: $service${NC}"
+                rm -f "$mysql_backup"
+            fi
+        fi
+    done <<< "$services"
+
+    if [ "$has_mysql" = false ] && [ "$DRY_RUN" = false ]; then
+        echo -e "${YELLOW}No MySQL backups created${NC}"
+    fi
+
+    echo ""
+}
+
+restore_mysql_services() {
+    local restore_dir=$1
+    local found=false
+
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}Restoring MySQL services${NC}"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+    # Ensure mysql plugin
+    if ! ssh $SSH_ALIAS "dokku plugin:list" 2>/dev/null | grep -q "mysql"; then
+        echo -e "${YELLOW}MySQL plugin not installed, installing...${NC}"
+        ssh $SSH_ALIAS "sudo dokku plugin:install https://github.com/dokku/dokku-mysql.git mysql" || true
+    fi
+
+    local file
+    for file in "$restore_dir"/*.sql.xz; do
+        [ -f "$file" ] || continue
+        local service
+        service=$(basename "$file" .sql.xz)
+        found=true
+
+        echo -e "${BLUE}Restoring MySQL service: $service${NC}"
+        if [ "$DRY_RUN" = true ]; then
+            echo -e "${YELLOW}   [DRY RUN] Would restore from $file${NC}"
+            continue
+        fi
+
+        if ! ssh $SSH_ALIAS "dokku mysql:exists $service" 2>/dev/null; then
+            echo -e "${BLUE}   Creating missing MySQL service: $service${NC}"
+            ssh $SSH_ALIAS "dokku mysql:create $service" || true
+        fi
+
+        if xz -dc "$file" | ssh $SSH_ALIAS "dokku mysql:import $service" >/dev/null 2>&1; then
+            echo -e "${GREEN}   Restored: $service${NC}"
+        else
+            echo -e "${YELLOW}   Initial import failed, retrying without GTID_PURGED...${NC}"
+            if xz -dc "$file" | sed '/^SET @@GLOBAL.GTID_PURGED=/d' | ssh $SSH_ALIAS "dokku mysql:import $service" >/dev/null; then
+                echo -e "${GREEN}   Restored (GTID_PURGED stripped): $service${NC}"
+            else
+                echo -e "${RED}   Failed to restore MySQL service: $service${NC}"
+                return 1
+            fi
+        fi
+    done
+
+    if [ "$found" = false ]; then
+        echo -e "${YELLOW}No MySQL backup files (*.sql.xz) found${NC}"
+    fi
+    echo ""
+}
 
 backup_app() {
     local deployment=$1
@@ -625,6 +733,67 @@ backup_app() {
         echo -e "${YELLOW}No databases or storage mounts to backup${NC}"
     fi
 
+    echo ""
+}
+
+restore_app() {
+    local deployment=$1
+    local restore_dir=$2
+    local domain=$(echo "$deployment" | jq -r '.domain')
+    local app_name=$(echo "$domain" | tr '.' '-')
+
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}Restoring: $domain${NC}"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+    # Restore Postgres dump if present (by convention: <app>-db.dump.xz)
+    local pg_name="${app_name}-db"
+    local pg_backup="$restore_dir/${pg_name}.dump.xz"
+    if [ -f "$pg_backup" ]; then
+        echo -e "${BLUE}Restoring PostgreSQL database: $pg_name${NC}"
+
+        if ! ssh $SSH_ALIAS "dokku plugin:list" 2>/dev/null | grep -q "postgres"; then
+            echo -e "${YELLOW}PostgreSQL plugin not installed, installing...${NC}"
+            ssh $SSH_ALIAS "sudo dokku plugin:install https://github.com/dokku/dokku-postgres.git postgres" || true
+        fi
+
+        if [ "$DRY_RUN" = true ]; then
+            echo -e "${YELLOW}   [DRY RUN] Would restore from $pg_backup${NC}"
+        else
+            if ! ssh $SSH_ALIAS "dokku postgres:exists $pg_name" 2>/dev/null; then
+                echo -e "${BLUE}   Creating missing Postgres service: $pg_name${NC}"
+                ssh $SSH_ALIAS "dokku postgres:create $pg_name" || true
+            fi
+            if xz -dc "$pg_backup" | ssh $SSH_ALIAS "dokku postgres:import $pg_name" >/dev/null; then
+                echo -e "${GREEN}   Restored: $pg_name${NC}"
+            else
+                echo -e "${RED}   Failed to restore PostgreSQL database: $pg_name${NC}"
+                return 1
+            fi
+        fi
+    fi
+
+    # Restore storage archive if present
+    local storage_backup="$restore_dir/${app_name}-storage.tar.xz"
+    local storage_base="/var/lib/dokku/data/storage/$app_name"
+    if [ -f "$storage_backup" ]; then
+        echo -e "${BLUE}Restoring storage: $storage_base${NC}"
+        if [ "$DRY_RUN" = true ]; then
+            echo -e "${YELLOW}   [DRY RUN] Would restore from $storage_backup${NC}"
+        else
+            ssh $SSH_ALIAS "sudo mkdir -p '$storage_base'" || true
+            if xz -dc "$storage_backup" | ssh $SSH_ALIAS "sudo tar -C '$storage_base' -xf -" >/dev/null; then
+                echo -e "${GREEN}   Restored storage for: $app_name${NC}"
+            else
+                echo -e "${RED}   Failed to restore storage for: $app_name${NC}"
+                return 1
+            fi
+        fi
+    fi
+
+    if [ ! -f "$pg_backup" ] && [ ! -f "$storage_backup" ]; then
+        echo -e "${YELLOW}No matching restore artifacts for this app${NC}"
+    fi
     echo ""
 }
 
@@ -821,6 +990,9 @@ if [ "$BACKUP_MODE" = true ]; then
         echo ""
     fi
 
+    # Backup MySQL services globally (not necessarily app-name derived)
+    backup_mysql_services "$BACKUP_DIR"
+
     # Backup each app
     for deployment in "${FILTERED_DEPLOYMENTS[@]}"; do
         backup_app "$deployment" "$BACKUP_DIR"
@@ -839,6 +1011,64 @@ if [ "$BACKUP_MODE" = true ]; then
             echo -e "Total backup size: ${GREEN}$total_size${NC} (xz -9 compressed)"
         fi
     fi
+    echo ""
+    exit 0
+fi
+
+# Handle restore mode
+if [ "$RESTORE_MODE" = true ]; then
+    if [ "$XZ_AVAILABLE" = false ]; then
+        echo -e "${RED}Error: xz is required for restore mode but not installed.${NC}"
+        echo "Install with: brew install xz (macOS) or apt install xz-utils (Linux)"
+        exit 1
+    fi
+
+    if [ -z "$RESTORE_DIR" ] || [ ! -d "$RESTORE_DIR" ]; then
+        echo -e "${RED}Error: --restore requires an existing backup directory${NC}"
+        echo "Example: $0 --restore ./backups/2026-02-25_125435"
+        exit 1
+    fi
+
+    echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
+    echo -e "${BLUE}   dokku-multideploy - Restore Mode${NC}"
+    echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "${BLUE}Restore directory: $RESTORE_DIR${NC}"
+    echo ""
+
+    if [ "$DRY_RUN" = true ]; then
+        echo -e "${YELLOW}DRY RUN MODE - No actual restores will occur${NC}"
+        echo ""
+    fi
+
+    if [ "$DRY_RUN" = false ] && [ "$YES_TO_ALL" = false ]; then
+        echo -e "${RED}WARNING: Restore may overwrite current database/storage state on target host.${NC}"
+        read -p "Continue restore? (yes/no): " confirm_restore
+        if [ "$confirm_restore" != "yes" ]; then
+            echo -e "${YELLOW}Restore cancelled.${NC}"
+            exit 0
+        fi
+        echo ""
+    fi
+
+    restore_failed=false
+    restore_mysql_services "$RESTORE_DIR" || restore_failed=true
+
+    for deployment in "${FILTERED_DEPLOYMENTS[@]}"; do
+        restore_app "$deployment" "$RESTORE_DIR" || restore_failed=true
+    done
+
+    if [ "$restore_failed" = true ]; then
+        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${RED}Restore finished with errors.${NC}"
+        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+        exit 1
+    fi
+
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}Restore complete!${NC}"
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     exit 0
 fi
@@ -886,6 +1116,28 @@ parse_env_file() {
     done < "$file"
 
     echo "$result"
+}
+
+get_env_value() {
+    local file=$1
+    local key=$2
+
+    [ ! -f "$file" ] && return 0
+
+    local line
+    line=$(grep -E "^${key}=" "$file" 2>/dev/null | tail -n 1 || true)
+    [ -z "$line" ] && return 0
+
+    local value="${line#*=}"
+    if [[ "$value" =~ ^\"(.*)\"$ ]] || [[ "$value" =~ ^\'(.*)\'$ ]]; then
+        value="${BASH_REMATCH[1]}"
+    fi
+    echo "$value"
+}
+
+escape_shell_single_quoted() {
+    local value="$1"
+    echo "${value//\'/\'\\\'\'}"
 }
 
 # Function to apply config only (env vars + restart)
@@ -999,6 +1251,8 @@ deploy_app() {
     fi
     local enable_postgres=$(echo "$deployment" | jq -r '.postgres')
     local enable_letsencrypt=$(echo "$deployment" | jq -r '.letsencrypt')
+    local mysql_service_name=""
+    local mysql_host=""
 
     # Export APP_NAME for use in deploy hooks
     export APP_NAME="$app_name"
@@ -1198,6 +1452,45 @@ deploy_app() {
         fi
     fi
 
+    # Auto-provision MySQL when DATABASE_HOST points to dokku-mysql-<service>
+    mysql_host=$(echo "$deployment" | jq -r '.env_vars.DATABASE_HOST // empty')
+    if [ -z "$mysql_host" ]; then
+        mysql_host=$(get_env_value "$SCRIPT_DIR/.env/$domain" "DATABASE_HOST")
+    fi
+    if [ -z "$mysql_host" ]; then
+        mysql_host=$(get_env_value "$SCRIPT_DIR/.env/_$source_dir" "DATABASE_HOST")
+    fi
+
+    if [[ "$mysql_host" == dokku-mysql-* ]]; then
+        mysql_service_name="${mysql_host#dokku-mysql-}"
+        echo -e "${BLUE}Detected MySQL service from DATABASE_HOST: $mysql_service_name${NC}"
+
+        # Ensure mysql plugin
+        if ! ssh $SSH_ALIAS "dokku plugin:list" 2>/dev/null | grep -q "mysql"; then
+            echo -e "${YELLOW}MySQL plugin not installed, installing...${NC}"
+            if ssh $SSH_ALIAS "sudo dokku plugin:install https://github.com/dokku/dokku-mysql.git mysql"; then
+                echo -e "${GREEN}MySQL plugin installed${NC}"
+            else
+                echo -e "${RED}Failed to install MySQL plugin${NC}"
+                echo -e "${YELLOW}Proceeding without automatic MySQL setup${NC}"
+                mysql_service_name=""
+            fi
+        fi
+
+        # Ensure mysql service exists
+        if [ -n "$mysql_service_name" ]; then
+            if ! ssh $SSH_ALIAS "dokku mysql:exists $mysql_service_name" 2>/dev/null; then
+                echo -e "${BLUE}Creating MySQL service: $mysql_service_name${NC}"
+                ssh $SSH_ALIAS "dokku mysql:create $mysql_service_name" || true
+            else
+                echo -e "${GREEN}MySQL service already exists: $mysql_service_name${NC}"
+            fi
+
+            echo -e "${BLUE}Linking MySQL service to app...${NC}"
+            ssh $SSH_ALIAS "dokku mysql:link $mysql_service_name $app_name" >/dev/null 2>&1 || true
+        fi
+    fi
+
     # Set domain (only if not already configured)
     echo -e "${BLUE}Setting domain: $domain${NC}"
     if ! ssh $SSH_ALIAS "dokku domains:report $app_name 2>/dev/null | grep -Fq '$domain'"; then
@@ -1328,6 +1621,41 @@ deploy_app() {
                 escaped_vars="$escaped_vars '${key}=${escaped_value}'"
             done < <(echo "$deployment" | jq -c '.env_vars | to_entries[]')
             ssh $SSH_ALIAS "dokku config:set --no-restart $app_name $escaped_vars" || true
+        fi
+    fi
+
+    # If MySQL service is managed by Dokku, force app DB vars from live service DSN
+    if [ -n "$mysql_service_name" ]; then
+        local mysql_dsn
+        mysql_dsn=$(ssh $SSH_ALIAS "dokku mysql:info $mysql_service_name --single-info-flag Dsn 2>/dev/null || dokku mysql:info $mysql_service_name 2>/dev/null | grep 'Dsn:' | sed 's/.*Dsn:[[:space:]]*//'" | tail -n 1)
+
+        if [ -n "$mysql_dsn" ] && [[ "$mysql_dsn" == mysql://* ]]; then
+            local mysql_user mysql_pass mysql_host_live mysql_port mysql_db
+            mysql_user=$(echo "$mysql_dsn" | sed -E 's#^mysql://([^:]+):.*#\1#')
+            mysql_pass=$(echo "$mysql_dsn" | sed -E 's#^mysql://[^:]+:([^@]+)@.*#\1#')
+            mysql_host_live=$(echo "$mysql_dsn" | sed -E 's#^mysql://[^@]+@([^:]+):.*#\1#')
+            mysql_port=$(echo "$mysql_dsn" | sed -E 's#^mysql://[^@]+@[^:]+:([0-9]+)/.*#\1#')
+            mysql_db=$(echo "$mysql_dsn" | sed -E 's#^.*/([^/?]+).*$#\1#')
+
+            local mysql_env_string=""
+            local mysql_host_live_escaped mysql_port_escaped mysql_db_escaped mysql_user_escaped mysql_pass_escaped
+            mysql_host_live_escaped=$(escape_shell_single_quoted "$mysql_host_live")
+            mysql_port_escaped=$(escape_shell_single_quoted "$mysql_port")
+            mysql_db_escaped=$(escape_shell_single_quoted "$mysql_db")
+            mysql_user_escaped=$(escape_shell_single_quoted "$mysql_user")
+            mysql_pass_escaped=$(escape_shell_single_quoted "$mysql_pass")
+            mysql_env_string="$mysql_env_string 'DATABASE_CLIENT=mysql2'"
+            mysql_env_string="$mysql_env_string 'DATABASE_HOST=${mysql_host_live_escaped}'"
+            mysql_env_string="$mysql_env_string 'DATABASE_PORT=${mysql_port_escaped}'"
+            mysql_env_string="$mysql_env_string 'DATABASE_NAME=${mysql_db_escaped}'"
+            mysql_env_string="$mysql_env_string 'DATABASE_USERNAME=${mysql_user_escaped}'"
+            mysql_env_string="$mysql_env_string 'DATABASE_PASSWORD=${mysql_pass_escaped}'"
+
+            echo -e "${BLUE}Applying MySQL connection vars from service DSN...${NC}"
+            ssh $SSH_ALIAS "dokku config:set --no-restart $app_name $mysql_env_string" || {
+                echo -e "${RED}Failed to apply MySQL connection vars from service DSN${NC}"
+                return 1
+            }
         fi
     fi
 
