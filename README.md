@@ -30,6 +30,32 @@ Host <ssh-alias>
 
 Then use `<ssh-alias>` as the `ssh_alias` in your config.json.
 
+## Global Install
+
+You can run this from any project by symlinking it into your `PATH`:
+
+```bash
+mkdir -p ~/bin
+ln -sf /absolute/path/to/dokku-multideploy/deploy.sh ~/bin/deploy
+chmod +x /absolute/path/to/dokku-multideploy/deploy.sh
+```
+
+Then use it inside any app folder that has `config.json`:
+
+```bash
+deploy --dry-run
+deploy --sync
+```
+
+Notes:
+- If you use fish shell and `deploy` is not found, add `~/bin` to fish paths:
+  `set -Ux fish_user_paths ~/bin $fish_user_paths`
+  Then restart your shell and verify with:
+  `command -v deploy`
+- By default, `deploy` looks for `config.json` next to the invoked script/symlink, then falls back to `$PWD/config.json`.
+- You can always override explicitly:
+  `CONFIG_FILE=$PWD/config.json deploy --dry-run`
+
 ## Quick Start
 
 ### Migrate existing Dokku server (most common)
@@ -259,6 +285,42 @@ DATABASE_PASSWORD=production-secret
 # Skip confirmation prompts
 ./deploy.sh --yes
 ```
+
+## Sync Check
+
+Compare local `config.json` against live Dokku state without deploying:
+
+```bash
+# Check all selected deployments
+./deploy.sh --sync
+
+# Check only a subset
+./deploy.sh --sync --tag staging
+./deploy.sh --sync api.example.com
+
+# Re-import live state before checking
+./deploy.sh --sync --refresh-sync
+
+# Clear cache and re-import
+./deploy.sh --sync --reset-sync
+```
+
+`--sync` behavior:
+1. Imports current Dokku app config to `.sync-cache/` (no git clone, no env secret export)
+2. Compares local vs remote by domain
+3. Reports:
+   - `✓ In sync`
+   - `✗ Missing on Dokku`
+   - `⚠ Drift` with per-field differences
+
+Cache options:
+- `--refresh-sync`: refresh `.sync-cache/config.json` before comparing
+- `--reset-sync`: clear the sync cache directory, then import fresh
+- `--sync-dir <dir>`: use a custom cache directory
+
+Exit codes:
+- `0`: all selected deployments are in sync
+- `1`: drift/missing detected or sync check failed
 
 ## Backup
 
