@@ -145,8 +145,9 @@ import_from_server() {
         docker_opts_raw=$(ssh "$ssh_alias" "dokku docker-options:report $app" 2>/dev/null | grep "Docker options deploy:" | sed 's/.*Docker options deploy:[[:space:]]*//')
         local docker_options_json="[]"
         if [ -n "$docker_opts_raw" ] && [ "$docker_opts_raw" != "" ]; then
-            # Extract -p port:port mappings (not -v volume mounts, those are handled by storage)
-            docker_options_json=$(echo "$docker_opts_raw" | grep -oE '\-p [0-9]+:[0-9]+' | while read opt; do
+            # Extract -p mappings (including ranges like 21100-21110:21100-21110).
+            # Ignore non-port options such as -v mounts (handled by storage import).
+            docker_options_json=$(echo "$docker_opts_raw" | grep -oE '\-p [0-9-]+:[0-9-]+' | while read opt; do
                 echo "\"$opt\""
             done | jq -s '.')
         fi
