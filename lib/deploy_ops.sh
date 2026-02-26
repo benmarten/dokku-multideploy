@@ -141,6 +141,14 @@ deploy_app() {
         return 1
     }
 
+    local repo_root
+    repo_root=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+    if [ -z "$repo_root" ]; then
+        echo -e "${RED}Error: $source_path is not inside a git repository${NC}"
+        cd "$SCRIPT_DIR"
+        return 1
+    fi
+
     # Determine which branch to use for deployment
     echo -e "${BLUE}Syncing with origin...${NC}"
 
@@ -234,13 +242,13 @@ deploy_app() {
             cd "$SCRIPT_DIR"
             return 1
         fi
-        if ! git rev-parse --verify "$repo_branch:$subtree_prefix" >/dev/null 2>&1; then
+        if ! git -C "$repo_root" rev-parse --verify "$repo_branch:$subtree_prefix" >/dev/null 2>&1; then
             echo -e "${RED}Error: subtree_prefix '$subtree_prefix' not found in branch '$repo_branch'${NC}"
             cd "$SCRIPT_DIR"
             return 1
         fi
         echo -e "${BLUE}Building subtree commit for: $subtree_prefix${NC}"
-        local_commit=$(git subtree split --prefix="$subtree_prefix" "$repo_branch" 2>/dev/null) || {
+        local_commit=$(git -C "$repo_root" subtree split --prefix="$subtree_prefix" "$repo_branch" 2>/dev/null) || {
             echo -e "${RED}Error: failed to create subtree commit for '$subtree_prefix'${NC}"
             cd "$SCRIPT_DIR"
             return 1
