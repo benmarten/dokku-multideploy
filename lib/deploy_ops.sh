@@ -96,6 +96,7 @@ deploy_app() {
     local deployment=$1
     local domain=$(echo "$deployment" | jq -r '.domain')
     local source_dir=$(echo "$deployment" | jq -r '.source_dir')
+    local subtree_prefix=$(echo "$deployment" | jq -r '.subtree_prefix // empty')
     local app_name=$(echo "$domain" | tr '.' '-')
     local dockerfile="Dockerfile"
     # Support absolute paths (starting with /) or relative paths
@@ -120,6 +121,9 @@ deploy_app() {
     echo -e "   App name:   $app_name"
     echo -e "   Source dir: $source_dir"
     echo -e "   Dockerfile: $dockerfile"
+    if [ -n "$subtree_prefix" ]; then
+        echo -e "   Subtree:    $subtree_prefix"
+    fi
     if [ -n "$builder_type" ]; then
         echo -e "   Builder:    $builder_type"
     fi
@@ -223,7 +227,27 @@ deploy_app() {
     # Fetch remote state quietly
     git fetch "$remote_name" "$dokku_branch" 2>/dev/null || true
 
-    local local_commit=$(git rev-parse "$repo_branch" 2>/dev/null)
+    local local_commit=""
+    if [ -n "$subtree_prefix" ]; then
+        if [[ "$subtree_prefix" == /* ]]; then
+            echo -e "${RED}Error: subtree_prefix must be relative to repo root (got: $subtree_prefix)${NC}"
+            cd "$SCRIPT_DIR"
+            return 1
+        fi
+        if ! git rev-parse --verify "$repo_branch:$subtree_prefix" >/dev/null 2>&1; then
+            echo -e "${RED}Error: subtree_prefix '$subtree_prefix' not found in branch '$repo_branch'${NC}"
+            cd "$SCRIPT_DIR"
+            return 1
+        fi
+        echo -e "${BLUE}Building subtree commit for: $subtree_prefix${NC}"
+        local_commit=$(git subtree split --prefix="$subtree_prefix" "$repo_branch" 2>/dev/null) || {
+            echo -e "${RED}Error: failed to create subtree commit for '$subtree_prefix'${NC}"
+            cd "$SCRIPT_DIR"
+            return 1
+        }
+    else
+        local_commit=$(git rev-parse "$repo_branch" 2>/dev/null)
+    fi
     local remote_commit=$(git rev-parse "$remote_name/$dokku_branch" 2>/dev/null || echo "")
 
     if [ "$FORCE_DEPLOY" = false ] && [ -n "$remote_commit" ] && [ "$local_commit" = "$remote_commit" ]; then
@@ -570,21 +594,29 @@ deploy_app() {
         echo ""
     fi
 
-    echo -e "${BLUE}Deploying branch: $repo_branch${NC}"
+    if [ -n "$subtree_prefix" ]; then
+        echo -e "${BLUE}Deploying subtree: $subtree_prefix (${local_commit:0:8})${NC}"
+    else
+        echo -e "${BLUE}Deploying branch: $repo_branch${NC}"
+    fi
 
     # Deploy
     echo -e "${GREEN}Pushing to Dokku...${NC}"
     echo ""
 
     # Try to push without force first
-    if git push "$remote_name" "$repo_branch:refs/heads/$dokku_branch"; then
+    local push_ref="$repo_branch"
+    if [ -n "$subtree_prefix" ]; then
+        push_ref="$local_commit"
+    fi
+    if git push "$remote_name" "$push_ref:refs/heads/$dokku_branch"; then
         echo ""
         echo -e "${GREEN}Pushed successfully${NC}"
     else
         # If that fails, it's likely a new app or history diverged
         echo ""
         echo -e "${YELLOW}Normal push failed, attempting force push...${NC}"
-        git push "$remote_name" "$repo_branch:refs/heads/$dokku_branch" -f
+        git push "$remote_name" "$push_ref:refs/heads/$dokku_branch" -f
     fi
 
     # Run post-deploy hook if it exists

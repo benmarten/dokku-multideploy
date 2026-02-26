@@ -4,6 +4,7 @@
 
   "api": {
     "source_dir": "api",
+    "subtree_prefix": "services/api",
     "branch": "main",
     "builder": "dockerfile",
     "postgres": true,
