@@ -8,12 +8,24 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Resolve the real script location (follow symlinks) so modules load correctly
+SCRIPT_SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SCRIPT_SOURCE" ]; do
+    SCRIPT_DIR_TMP="$(cd -P "$(dirname "$SCRIPT_SOURCE")" && pwd)"
+    SCRIPT_TARGET="$(readlink "$SCRIPT_SOURCE")"
+    if [[ "$SCRIPT_TARGET" != /* ]]; then
+        SCRIPT_SOURCE="$SCRIPT_DIR_TMP/$SCRIPT_TARGET"
+    else
+        SCRIPT_SOURCE="$SCRIPT_TARGET"
+    fi
+done
+
 # Script location and config resolution
 # Priority:
 # 1) CONFIG_FILE env var (if provided)
 # 2) config.json next to invoked script/symlink
 # 3) config.json in current working directory (for global `deploy` command)
-SCRIPT_HOME="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_HOME="$(cd -P "$(dirname "$SCRIPT_SOURCE")" && pwd)"
 SCRIPT_DIR="$SCRIPT_HOME"
 if [ -n "${CONFIG_FILE:-}" ]; then
     if [[ "$CONFIG_FILE" != /* ]]; then
