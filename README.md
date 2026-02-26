@@ -187,6 +187,7 @@ your-project/
   "api": {
     "source_dir": "api",
     "branch": "main",
+    "builder": "dockerfile",
     "postgres": true,
     "letsencrypt": true,
     "env_vars": {
@@ -223,6 +224,7 @@ your-project/
 |-----|-------------|
 | `source_dir` | Directory containing the source code and Dockerfile. Supports relative paths (`api`, `../sibling-repo`) or absolute paths (`/path/to/project`) |
 | `branch` | Git branch to deploy (auto-detects if not set) |
+| `builder` | Dokku builder type (for example `dockerfile`, `herokuish`, or `pack`) |
 | `postgres` | Auto-create and link PostgreSQL database (`true`/`false`) |
 | `letsencrypt` | Auto-provision Let's Encrypt SSL (`true`/`false`) |
 | `env_vars` | Environment variables (set at runtime) |

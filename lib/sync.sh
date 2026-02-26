@@ -64,6 +64,7 @@ run_sync_check() {
                 domain: $domain,
                 summary: {
                     branch: ($child.branch // $parent.branch // null),
+                    builder: ($child.builder // $parent.builder // null),
                     postgres: (($child.postgres // $parent.postgres // false) == true or ($child.postgres // $parent.postgres // false) == "true"),
                     letsencrypt: (($child.letsencrypt // $parent.letsencrypt // false) == true or ($child.letsencrypt // $parent.letsencrypt // false) == "true"),
                     ports: (($child.ports // $parent.ports // []) | map(tostring) | sort),
@@ -86,6 +87,7 @@ run_sync_check() {
         local local_summary
         local_summary=$(echo "$deployment" | jq -c '{
             branch: (.branch // null),
+            builder: (.builder // null),
             postgres: (.postgres == true),
             letsencrypt: (.letsencrypt == true),
             ports: ((.ports // [])
@@ -124,7 +126,7 @@ run_sync_check() {
 
         local diff_fields=()
         local field
-        for field in branch postgres letsencrypt ports storage_mounts docker_options extra_domains; do
+        for field in branch builder postgres letsencrypt ports storage_mounts docker_options extra_domains; do
             local local_val
             local remote_val
             local_val=$(echo "$local_summary" | jq -c ".$field")

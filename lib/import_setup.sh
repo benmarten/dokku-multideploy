@@ -171,6 +171,10 @@ import_from_server() {
         branch=$(ssh "$ssh_alias" "dokku git:report $app" 2>/dev/null | grep "Git deploy branch:" | awk '{print $NF}')
         [ -z "$branch" ] && branch="master"
 
+        # Get builder type
+        local builder=""
+        builder=$(ssh "$ssh_alias" "dokku builder:report $app" 2>/dev/null | grep "Builder selected:" | awk '{print $NF}')
+
         # Export env vars
         if [ "$import_secrets" = true ]; then
             echo -e "  ${BLUE}Exporting env vars...${NC}"
@@ -205,6 +209,7 @@ import_from_server() {
             --arg domain "$primary_domain" \
             --arg source_dir "$primary_domain" \
             --arg branch "$branch" \
+            --arg builder "$builder" \
             --arg postgres "$postgres" \
             --arg letsencrypt "$letsencrypt" \
             --argjson ports "$ports_json" \
@@ -214,6 +219,7 @@ import_from_server() {
             '{
                 source_dir: $source_dir,
                 branch: $branch,
+                builder: (if $builder == "" then null else $builder end),
                 postgres: (if $postgres == "true" then true else null end),
                 letsencrypt: (if $letsencrypt == "true" then true else null end),
                 ports: (if $ports == [] then null else $ports end),

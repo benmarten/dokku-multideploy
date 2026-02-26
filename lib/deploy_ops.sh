@@ -107,6 +107,7 @@ deploy_app() {
     fi
     local enable_postgres=$(echo "$deployment" | jq -r '.postgres')
     local enable_letsencrypt=$(echo "$deployment" | jq -r '.letsencrypt')
+    local builder_type=$(echo "$deployment" | jq -r '.builder // empty')
     local mysql_service_name=""
     local mysql_host=""
 
@@ -119,6 +120,9 @@ deploy_app() {
     echo -e "   App name:   $app_name"
     echo -e "   Source dir: $source_dir"
     echo -e "   Dockerfile: $dockerfile"
+    if [ -n "$builder_type" ]; then
+        echo -e "   Builder:    $builder_type"
+    fi
     echo ""
 
     if [ "$DRY_RUN" = true ]; then
@@ -246,6 +250,21 @@ deploy_app() {
     # Create app if doesn't exist
     echo -e "${BLUE}Ensuring app exists on Dokku...${NC}"
     ssh $SSH_ALIAS "dokku apps:exists $app_name || dokku apps:create $app_name" || true
+
+    # Configure Dokku builder if explicitly set in config
+    if [ -n "$builder_type" ]; then
+        local current_builder
+        current_builder=$(ssh $SSH_ALIAS "dokku builder:report $app_name 2>/dev/null | grep 'Builder selected:' | awk '{print \$NF}'" || echo "")
+        if [ "$current_builder" != "$builder_type" ]; then
+            echo -e "${BLUE}Setting builder: $builder_type${NC}"
+            if ! ssh $SSH_ALIAS "dokku builder:set $app_name $builder_type"; then
+                echo -e "${RED}Failed to set builder '$builder_type' for $app_name${NC}"
+                return 1
+            fi
+        else
+            echo -e "${GREEN}Builder already configured: $builder_type${NC}"
+        fi
+    fi
 
     # Install plugins if configured
     if echo "$deployment" | jq -e '.plugins' > /dev/null 2>&1; then

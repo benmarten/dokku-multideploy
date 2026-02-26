@@ -367,6 +367,7 @@ for parent_type in $(jq -r 'to_entries[] | select(.value | type == "object" and 
     parent_config=$(jq -c ".[\"${parent_type}\"]" "$CONFIG_FILE")
     parent_source_dir=$(echo "$parent_config" | jq -r '.source_dir // ""')
     parent_branch=$(echo "$parent_config" | jq -r '.branch // ""')
+    parent_builder=$(echo "$parent_config" | jq -r '.builder // ""')
     parent_env_vars=$(echo "$parent_config" | jq -c '.env_vars // {}')
     parent_build_args=$(echo "$parent_config" | jq -c '.build_args // {}')
     parent_storage_mounts=$(echo "$parent_config" | jq -c '.storage_mounts // []')
@@ -386,6 +387,7 @@ for parent_type in $(jq -r 'to_entries[] | select(.value | type == "object" and 
             --arg domain "$domain" \
             --arg source_dir "$parent_source_dir" \
             --arg branch "$parent_branch" \
+            --arg builder "$parent_builder" \
             --arg postgres "$parent_postgres" \
             --arg letsencrypt "$parent_letsencrypt" \
             --argjson parent_env_vars "$parent_env_vars" \
@@ -400,6 +402,7 @@ for parent_type in $(jq -r 'to_entries[] | select(.value | type == "object" and 
                 domain: $domain,
                 source_dir: (if ($child.source_dir // $source_dir) == "" then "." else ($child.source_dir // $source_dir) end),
                 branch: (if ($child.branch // $branch) == "" then null else ($child.branch // $branch) end),
+                builder: (if ($child.builder // $builder) == "" then null else ($child.builder // $builder) end),
                 tags: ($child.tags // []),
                 postgres: (($child.postgres // $postgres) == "true" or ($child.postgres // $postgres) == true),
                 letsencrypt: (($child.letsencrypt // $letsencrypt) == "true" or ($child.letsencrypt // $letsencrypt) == true),
