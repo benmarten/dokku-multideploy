@@ -151,7 +151,11 @@ deploy_app() {
     local subtree_prefix_effective="$subtree_prefix"
     local repo_root_rel=""
     if [ -n "$subtree_prefix" ] && [[ "$repo_root" == "$SCRIPT_DIR"/* ]]; then
-        repo_root_rel="${repo_root#$SCRIPT_DIR/}"
+        if [ "$repo_root" = "$SCRIPT_DIR" ]; then
+            repo_root_rel=""
+        else
+            repo_root_rel="${repo_root#$SCRIPT_DIR/}"
+        fi
         if [ "$subtree_prefix" = "$repo_root_rel" ]; then
             subtree_prefix_effective=""
         elif [[ "$subtree_prefix" == "$repo_root_rel/"* ]]; then
