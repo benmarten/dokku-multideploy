@@ -148,6 +148,16 @@ deploy_app() {
         cd "$SCRIPT_DIR"
         return 1
     fi
+    local subtree_prefix_effective="$subtree_prefix"
+    local repo_root_rel=""
+    if [ -n "$subtree_prefix" ] && [[ "$repo_root" == "$SCRIPT_DIR"/* ]]; then
+        repo_root_rel="${repo_root#$SCRIPT_DIR/}"
+        if [ "$subtree_prefix" = "$repo_root_rel" ]; then
+            subtree_prefix_effective=""
+        elif [[ "$subtree_prefix" == "$repo_root_rel/"* ]]; then
+            subtree_prefix_effective="${subtree_prefix#$repo_root_rel/}"
+        fi
+    fi
 
     # Determine which branch to use for deployment
     echo -e "${BLUE}Syncing with origin...${NC}"
@@ -236,25 +246,28 @@ deploy_app() {
     git fetch "$remote_name" "$dokku_branch" 2>/dev/null || true
 
     local local_commit=""
-    if [ -n "$subtree_prefix" ]; then
-        if [[ "$subtree_prefix" == /* ]]; then
-            echo -e "${RED}Error: subtree_prefix must be relative to repo root (got: $subtree_prefix)${NC}"
+    if [ -n "$subtree_prefix_effective" ]; then
+        if [[ "$subtree_prefix_effective" == /* ]]; then
+            echo -e "${RED}Error: subtree_prefix must be relative to repo root (got: $subtree_prefix_effective)${NC}"
             cd "$SCRIPT_DIR"
             return 1
         fi
-        if ! git -C "$repo_root" rev-parse --verify "$repo_branch:$subtree_prefix" >/dev/null 2>&1; then
-            echo -e "${RED}Error: subtree_prefix '$subtree_prefix' not found in branch '$repo_branch'${NC}"
+        if ! git -C "$repo_root" rev-parse --verify "$repo_branch:$subtree_prefix_effective" >/dev/null 2>&1; then
+            echo -e "${RED}Error: subtree_prefix '$subtree_prefix_effective' not found in branch '$repo_branch'${NC}"
             cd "$SCRIPT_DIR"
             return 1
         fi
-        echo -e "${BLUE}Building subtree commit for: $subtree_prefix${NC}"
-        local_commit=$(git -C "$repo_root" subtree split --prefix="$subtree_prefix" "$repo_branch" 2>/dev/null) || {
-            echo -e "${RED}Error: failed to create subtree commit for '$subtree_prefix'${NC}"
+        echo -e "${BLUE}Building subtree commit for: $subtree_prefix_effective${NC}"
+        local_commit=$(git -C "$repo_root" subtree split --prefix="$subtree_prefix_effective" "$repo_branch" 2>/dev/null) || {
+            echo -e "${RED}Error: failed to create subtree commit for '$subtree_prefix_effective'${NC}"
             cd "$SCRIPT_DIR"
             return 1
         }
     else
-        local_commit=$(git rev-parse "$repo_branch" 2>/dev/null)
+        if [ -n "$subtree_prefix" ]; then
+            echo -e "${BLUE}Subtree prefix resolves to repository root; using branch commit directly${NC}"
+        fi
+        local_commit=$(git -C "$repo_root" rev-parse "$repo_branch" 2>/dev/null)
     fi
     local remote_commit=$(git rev-parse "$remote_name/$dokku_branch" 2>/dev/null || echo "")
 
@@ -602,8 +615,8 @@ deploy_app() {
         echo ""
     fi
 
-    if [ -n "$subtree_prefix" ]; then
-        echo -e "${BLUE}Deploying subtree: $subtree_prefix (${local_commit:0:8})${NC}"
+    if [ -n "$subtree_prefix_effective" ]; then
+        echo -e "${BLUE}Deploying subtree: $subtree_prefix_effective (${local_commit:0:8})${NC}"
     else
         echo -e "${BLUE}Deploying branch: $repo_branch${NC}"
     fi
@@ -614,7 +627,7 @@ deploy_app() {
 
     # Try to push without force first
     local push_ref="$repo_branch"
-    if [ -n "$subtree_prefix" ]; then
+    if [ -n "$subtree_prefix_effective" ]; then
         push_ref="$local_commit"
     fi
     if git push "$remote_name" "$push_ref:refs/heads/$dokku_branch"; then
