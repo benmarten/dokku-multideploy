@@ -139,11 +139,22 @@ run_sync_check() {
 
             # Treat default single http mapping as equivalent to unset ports.
             if [ "$field" = "ports" ]; then
-                if [[ "$local_val" =~ ^\\[\"http:80:[0-9]+\"\\]$ ]]; then
-                    local_val="[]"
-                fi
-                if [[ "$remote_val" =~ ^\\[\"http:80:[0-9]+\"\\]$ ]]; then
-                    remote_val="[]"
+                local_val=$(echo "$local_val" | jq -c '
+                    map(tostring)
+                    | map(select(test("^http:80:[0-9]+$|^https:443:[0-9]+$") | not))
+                    | sort
+                ')
+                remote_val=$(echo "$remote_val" | jq -c '
+                    map(tostring)
+                    | map(select(test("^http:80:[0-9]+$|^https:443:[0-9]+$") | not))
+                    | sort
+                ')
+            fi
+
+            # Treat unspecified builder as equivalent to Dokku's default selected builder.
+            if [ "$field" = "builder" ]; then
+                if [ "$local_val" = "null" ] && { [ "$remote_val" = "null" ] || [ "$remote_val" = "\"selected:\"" ] || [ "$remote_val" = "\"selected\"" ]; }; then
+                    continue
                 fi
             fi
 
