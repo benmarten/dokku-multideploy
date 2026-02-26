@@ -4,7 +4,9 @@
 
   "api": {
     "source_dir": "api",
+    "subtree_prefix": "services/api",
     "branch": "main",
+    "builder": "dockerfile",
     "postgres": true,
     "letsencrypt": true,
     "env_vars": {
@@ -29,6 +31,7 @@
   "web": {
     "source_dir": "web",
     "branch": "main",
+    "builder": "dockerfile",
     "letsencrypt": true,
     "ports": ["http:80:3000"],
     "build_args": {
@@ -54,6 +57,7 @@
   "worker": {
     "source_dir": "worker",
     "branch": "main",
+    "builder": "dockerfile",
     "postgres": true,
     "storage_mounts": [
       "/var/lib/dokku/data/storage/worker:/app/data"
