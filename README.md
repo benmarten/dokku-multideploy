@@ -362,6 +362,7 @@ Storage backup notes:
 - Mounts marked `backup:false` are skipped in backup mode and explicitly listed in CLI output.
 - Mounts larger than `100MB` are skipped by default and explicitly listed in CLI output.
 - Override threshold with `BACKUP_MAX_STORAGE_MB` (`0` disables size-based skipping).
+- Backup mode prints a final consolidated "Manual rsync required" list across all apps.
 - Use direct host-to-host `rsync` for skipped large volumes during migrations.
 
 ## Restore

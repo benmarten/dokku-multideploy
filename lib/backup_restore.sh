@@ -1,3 +1,30 @@
+SKIPPED_MIGRATION_PATHS=()
+
+record_skipped_migration_path() {
+    local app_name=$1
+    local host_path=$2
+    local reason=$3
+    SKIPPED_MIGRATION_PATHS+=("$app_name|$host_path|$reason")
+}
+
+print_skipped_migration_summary() {
+    if [ "${#SKIPPED_MIGRATION_PATHS[@]}" -eq 0 ]; then
+        return
+    fi
+
+    echo -e "${YELLOW}Manual rsync required for skipped storage paths:${NC}"
+    local entry
+    for entry in "${SKIPPED_MIGRATION_PATHS[@]}"; do
+        local app_name="${entry%%|*}"
+        local remainder="${entry#*|}"
+        local host_path="${remainder%%|*}"
+        local reason="${entry##*|}"
+        echo -e "${YELLOW}   - [$app_name] $host_path ($reason)${NC}"
+    done
+    echo -e "${YELLOW}   Suggested: direct host-to-host rsync for the paths above.${NC}"
+    echo ""
+}
+
 backup_mysql_services() {
     local backup_dir=$1
     local has_mysql=false
@@ -181,6 +208,7 @@ backup_app() {
 
             if [ "$backup_enabled" != "true" ]; then
                 skipped_disabled_mounts+=("$host_path")
+                record_skipped_migration_path "$app_name" "$host_path" "backup=false"
                 continue
             fi
 
@@ -196,6 +224,7 @@ backup_app() {
             fi
             if [ "$backup_max_storage_mb" -gt 0 ] && [ "$mount_size_mb" -gt "$backup_max_storage_mb" ]; then
                 skipped_large_mounts+=("$host_path (${mount_size_mb}MB)")
+                record_skipped_migration_path "$app_name" "$host_path" "size=${mount_size_mb}MB > ${backup_max_storage_mb}MB"
                 continue
             fi
 
