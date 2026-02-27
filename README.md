@@ -351,10 +351,19 @@ This creates timestamped backup folders:
 ```
 ./backups/2026-01-06_143022/
 ├── api-example-com-db.dump.xz       # PostgreSQL dump (pg_dump custom format)
-└── api-example-com-storage-1.tar.xz # Storage mount contents
+├── api-example-com-storage-1.tar.xz # Storage mount #1 contents
+└── api-example-com-storage-2.tar.xz # Storage mount #2 contents
 ```
 
 Backups are saved to `./backups/<timestamp>/` by default (gitignored).
+
+Storage backup notes:
+- `storage_mounts` supports object entries like `{"mount":"<host>:<container>","backup":false}`.
+- Mounts marked `backup:false` are skipped in backup mode and explicitly listed in CLI output.
+- Mounts larger than `100MB` are skipped by default and explicitly listed in CLI output.
+- Override threshold with `BACKUP_MAX_STORAGE_MB` (`0` disables size-based skipping).
+- Backup mode prints a final consolidated "Manual rsync required" list across all apps.
+- Use direct host-to-host `rsync` for skipped large volumes during migrations.
 
 ## Restore
 

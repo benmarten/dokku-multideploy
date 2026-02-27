@@ -522,6 +522,7 @@ if [ "$BACKUP_MODE" = true ]; then
     for deployment in "${FILTERED_DEPLOYMENTS[@]}"; do
         backup_app "$deployment" "$BACKUP_DIR"
     done
+    print_skipped_migration_summary
 
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${GREEN}Backup complete!${NC}"
