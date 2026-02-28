@@ -153,7 +153,7 @@ run_sync_check() {
 
             # Treat unspecified builder as equivalent to Dokku's default selected builder.
             if [ "$field" = "builder" ]; then
-                if [ "$local_val" = "null" ] && { [ "$remote_val" = "null" ] || [ "$remote_val" = "\"selected:\"" ] || [ "$remote_val" = "\"selected\"" ]; }; then
+                if [ "$local_val" = "null" ] && { [ "$remote_val" = "null" ] || [ "$remote_val" = "\"herokuish\"" ] || [ "$remote_val" = "\"selected:\"" ] || [ "$remote_val" = "\"selected\"" ]; }; then
                     continue
                 fi
             fi
