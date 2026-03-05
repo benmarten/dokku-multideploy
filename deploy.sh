@@ -619,6 +619,36 @@ if [ "$SYNC_MODE" = true ]; then
     fi
 fi
 
+# Ensure global Let's Encrypt email is configured when needed
+LETSENCRYPT_EMAIL=$(jq -r '.letsencrypt_email // empty' "$CONFIG_FILE")
+LETSENCRYPT_REQUIRED=false
+for deployment in "${FILTERED_DEPLOYMENTS[@]}"; do
+    if [ "$(echo "$deployment" | jq -r '.letsencrypt')" = "true" ]; then
+        LETSENCRYPT_REQUIRED=true
+        break
+    fi
+done
+
+if [ "$LETSENCRYPT_REQUIRED" = true ]; then
+    if [ -z "$LETSENCRYPT_EMAIL" ]; then
+        echo -e "${YELLOW}Let's Encrypt is enabled for one or more deployments, but root-level letsencrypt_email is not set in config.json${NC}"
+    elif [ "$DRY_RUN" = true ]; then
+        echo -e "${YELLOW}[DRY RUN] Would set Dokku global Let's Encrypt email to: $LETSENCRYPT_EMAIL${NC}"
+    elif ! ssh $SSH_ALIAS "dokku plugin:list" 2>/dev/null | grep -q "letsencrypt"; then
+        echo -e "${YELLOW}Let's Encrypt plugin not installed on Dokku${NC}"
+        echo -e "${YELLOW}Install with: ssh $SSH_ALIAS sudo dokku plugin:install https://github.com/dokku/dokku-letsencrypt.git${NC}"
+    else
+        echo -e "${BLUE}Ensuring Dokku global Let's Encrypt email is set...${NC}"
+        if ssh $SSH_ALIAS "dokku letsencrypt:set --global email $LETSENCRYPT_EMAIL" >/dev/null; then
+            echo -e "${GREEN}Global Let's Encrypt email configured: $LETSENCRYPT_EMAIL${NC}"
+        else
+            echo -e "${YELLOW}Failed to set global Let's Encrypt email automatically${NC}"
+            echo -e "${YELLOW}Run manually: ssh $SSH_ALIAS dokku letsencrypt:set --global email $LETSENCRYPT_EMAIL${NC}"
+        fi
+    fi
+    echo ""
+fi
+
 # Deploy or update config for each app
 for deployment in "${FILTERED_DEPLOYMENTS[@]}"; do
     if [ "$CONFIG_ONLY" = true ]; then

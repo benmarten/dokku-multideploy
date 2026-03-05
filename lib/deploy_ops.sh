@@ -3,6 +3,7 @@ apply_config_only() {
     local domain=$(echo "$deployment" | jq -r '.domain')
     local source_dir=$(echo "$deployment" | jq -r '.source_dir')
     local app_name=$(echo "$domain" | tr '.' '-')
+    local enable_letsencrypt=$(echo "$deployment" | jq -r '.letsencrypt // false')
 
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${GREEN}Updating config: $domain${NC}"
@@ -81,6 +82,52 @@ apply_config_only() {
                     echo -e "${GREEN}   $extra_domain already configured${NC}"
                 fi
             done <<< "$extra_domains"
+        fi
+    fi
+
+
+    # Apply Let's Encrypt SSL in config-only mode when requested
+    if [ "$enable_letsencrypt" = "true" ]; then
+        echo -e "${BLUE}Checking SSL configuration...${NC}"
+
+    # Let's Encrypt cannot issue certs for internal .dokku hostnames
+    local default_dokku_vhost="${app_name}.dokku"
+    local escaped_default_dokku_vhost="${app_name//./\.}\.dokku"
+    if ssh -n $SSH_ALIAS "dokku domains:report $app_name 2>/dev/null | grep -E '(^|[[:space:]])${escaped_default_dokku_vhost}([[:space:]]|$)'" >/dev/null; then
+        echo -e "${BLUE}Removing internal Dokku vhost ($default_dokku_vhost) before Let's Encrypt...${NC}"
+        ssh -n $SSH_ALIAS "dokku domains:remove $app_name $default_dokku_vhost" || true
+    fi
+
+        if ! ssh $SSH_ALIAS "dokku plugin:list" 2>/dev/null | grep -q "letsencrypt"; then
+            echo -e "${YELLOW}Let's Encrypt plugin not installed on Dokku${NC}"
+            echo -e "${YELLOW}Install with: ssh $SSH_ALIAS sudo dokku plugin:install https://github.com/dokku/dokku-letsencrypt.git${NC}"
+            echo -e "${YELLOW}Then configure: ssh $SSH_ALIAS dokku letsencrypt:set --global email your-email@example.com${NC}"
+        elif ssh $SSH_ALIAS "dokku certs:report $app_name" 2>/dev/null | grep -q "Ssl enabled:.*true"; then
+            echo -e "${GREEN}SSL already enabled${NC}"
+        else
+            echo -e "${BLUE}Enabling Let's Encrypt SSL certificate...${NC}"
+            local ssl_output
+            local ssl_exit_code
+            set +e
+            ssl_output=$(ssh $SSH_ALIAS "dokku letsencrypt:enable $app_name" 2>&1)
+            ssl_exit_code=$?
+            set -e
+
+            if [ $ssl_exit_code -eq 0 ]; then
+                echo -e "${GREEN}SSL certificate provisioned successfully${NC}"
+            else
+                echo -e "${YELLOW}SSL setup failed${NC}"
+                if echo "$ssl_output" | grep -q "e-mail"; then
+                    echo -e "${YELLOW}   Missing email configuration. Set it with:${NC}"
+                    echo -e "${YELLOW}   ssh $SSH_ALIAS dokku letsencrypt:set --global email your-email@example.com${NC}"
+                elif echo "$ssl_output" | grep -q "rate"; then
+                    echo -e "${YELLOW}   Let's Encrypt rate limit reached. Try again later.${NC}"
+                elif echo "$ssl_output" | grep -q "DNS\|domain"; then
+                    echo -e "${YELLOW}   DNS may not be configured or propagated yet${NC}"
+                fi
+                echo -e "${YELLOW}   You can enable it manually later with:${NC}"
+                echo -e "${YELLOW}   ssh $SSH_ALIAS dokku letsencrypt:enable $app_name${NC}"
+            fi
         fi
     fi
 
@@ -696,6 +743,14 @@ deploy_app() {
     if [ "$enable_letsencrypt" = "true" ]; then
         echo -e "${BLUE}Checking SSL configuration...${NC}"
 
+    # Let's Encrypt cannot issue certs for internal .dokku hostnames
+    local default_dokku_vhost="${app_name}.dokku"
+    local escaped_default_dokku_vhost="${app_name//./\.}\.dokku"
+    if ssh -n $SSH_ALIAS "dokku domains:report $app_name 2>/dev/null | grep -E '(^|[[:space:]])${escaped_default_dokku_vhost}([[:space:]]|$)'" >/dev/null; then
+        echo -e "${BLUE}Removing internal Dokku vhost ($default_dokku_vhost) before Let's Encrypt...${NC}"
+        ssh -n $SSH_ALIAS "dokku domains:remove $app_name $default_dokku_vhost" || true
+    fi
+
         # Check if letsencrypt plugin is installed
         if ! ssh $SSH_ALIAS "dokku plugin:list" 2>/dev/null | grep -q "letsencrypt"; then
             echo -e "${YELLOW}Let's Encrypt plugin not installed on Dokku${NC}"
@@ -706,8 +761,11 @@ deploy_app() {
         else
             echo -e "${BLUE}Enabling Let's Encrypt SSL certificate...${NC}"
             local ssl_output
+            local ssl_exit_code
+            set +e
             ssl_output=$(ssh $SSH_ALIAS "dokku letsencrypt:enable $app_name" 2>&1)
-            local ssl_exit_code=$?
+            ssl_exit_code=$?
+            set -e
 
             if [ $ssl_exit_code -eq 0 ]; then
                 echo -e "${GREEN}SSL certificate provisioned successfully${NC}"

@@ -1,6 +1,7 @@
 {
   "ssh_host": "dokku@your-server.com",
   "ssh_alias": "dokku",
+  "letsencrypt_email": "admin@example.com",
 
   "api": {
     "source_dir": "api",

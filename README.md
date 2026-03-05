@@ -183,6 +183,7 @@ your-project/
 {
   "ssh_host": "dokku@<your-server-ip>",
   "ssh_alias": "<ssh-alias>",
+  "letsencrypt_email": "admin@example.com",
 
   "api": {
     "source_dir": "api",
@@ -219,6 +220,7 @@ your-project/
 |-----|-------------|
 | `ssh_host` | Full SSH host for git push (e.g., `dokku@1.2.3.4`) |
 | `ssh_alias` | SSH alias for commands (e.g., `dokku` if configured in `~/.ssh/config`) |
+| `letsencrypt_email` | Global email used for Let's Encrypt certificate requests |
 
 #### Parent Level (e.g., "api", "web")
 | Key | Description |
