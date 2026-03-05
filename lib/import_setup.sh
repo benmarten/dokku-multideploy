@@ -2,6 +2,10 @@ import_from_server() {
     local import_dir="$1"
     local ssh_alias="$2"
     local import_secrets="$3"
+    shift 3
+    local selected_apps=("$@")
+    local import_global_domain="${IMPORT_GLOBAL_DOMAIN:-}"
+    local import_letsencrypt_email="${IMPORT_LETSENCRYPT_EMAIL:-}"
 
     echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
     echo -e "${BLUE}   dokku-multideploy - Import Mode${NC}"
@@ -41,8 +45,37 @@ import_from_server() {
     echo -e "${GREEN}Found $app_count apps${NC}"
     echo ""
 
+    if [ ${#selected_apps[@]} -gt 0 ]; then
+        local filtered_apps=""
+        for requested_app in "${selected_apps[@]}"; do
+            if echo "$apps" | tr ' ' '\n' | grep -Fxq "$requested_app"; then
+                filtered_apps+="$requested_app "
+            else
+                echo -e "${YELLOW}Skipping unknown app: $requested_app${NC}"
+            fi
+        done
+        filtered_apps=$(echo "$filtered_apps" | xargs || true)
+        if [ -z "$filtered_apps" ]; then
+            echo -e "${RED}No matching apps found for selection${NC}"
+            exit 1
+        fi
+        apps="$filtered_apps"
+        app_count=$(echo "$apps" | wc -w | tr -d ' ')
+        echo -e "${BLUE}Import filter applied (${#selected_apps[@]} requested):${NC}"
+        for selected_app in $apps; do
+            echo -e "  ${BLUE}•${NC} $selected_app"
+        done
+        echo ""
+    fi
+
     # Initialize config structure
     local config_json='{"ssh_alias": "'$ssh_alias'", "ssh_host": "dokku@'$ssh_host'"}'
+    if [ -n "$import_global_domain" ]; then
+        config_json=$(echo "$config_json" | jq --arg gd "$import_global_domain" '. + {global_domain: $gd}')
+    fi
+    if [ -n "$import_letsencrypt_email" ]; then
+        config_json=$(echo "$config_json" | jq --arg le "$import_letsencrypt_email" '. + {letsencrypt_email: $le}')
+    fi
 
     # Process each app
     local count=0
@@ -76,24 +109,30 @@ import_from_server() {
         local domains
         domains=$(ssh "$ssh_alias" "dokku domains:report $app" 2>/dev/null | grep "Domains app vhosts:" | sed 's/.*Domains app vhosts:[[:space:]]*//')
 
-        # Find custom domains (exclude auto-generated ones starting with app-name.)
+        # Find primary/extra domains and ignore internal Dokku vhosts
         local primary_domain=""
         local extra_domains=""
-        local app_prefix="${app}."
 
-        # Collect only custom domains (not starting with app name)
         for domain in $domains; do
-            if [[ "$domain" != ${app_prefix}* ]]; then
-                if [ -z "$primary_domain" ]; then
-                    primary_domain="$domain"
-                else
-                    extra_domains="$extra_domains $domain"
-                fi
+            # Ignore internal Dokku domain(s)
+            if [[ "$domain" == *.dokku ]]; then
+                continue
+            fi
+            if [ -z "$primary_domain" ]; then
+                primary_domain="$domain"
+            else
+                extra_domains="$extra_domains $domain"
             fi
         done
         extra_domains=$(echo "$extra_domains" | xargs)  # trim whitespace
 
-        # If no custom domain found, use first available domain as primary (but no extras)
+        # If no public domain exists, synthesize one from global_domain when available
+        if [ -z "$primary_domain" ] && [ -n "$import_global_domain" ]; then
+            primary_domain="$app.$import_global_domain"
+            extra_domains=""
+        fi
+
+        # If still empty, fall back to first available domain from Dokku report
         if [ -z "$primary_domain" ]; then
             primary_domain=$(echo "$domains" | awk '{print $1}')
             extra_domains=""
@@ -102,10 +141,17 @@ import_from_server() {
         if [ -z "$primary_domain" ] || [ "$primary_domain" = "$app" ]; then
             primary_domain="$app"
         fi
+
+        # Default local folder style for synthesized domains: app-global-domain
+        local source_dir_value="$primary_domain"
+        if [ -n "$import_global_domain" ] && [ "$primary_domain" = "$app.$import_global_domain" ]; then
+            source_dir_value=$(echo "$primary_domain" | tr '.' '-')
+        fi
+
         echo -e "  Domain: $primary_domain"
 
-        # Rename cloned directory to use domain name (matches source_dir)
-        local domain_dir="$import_dir/$primary_domain"
+        # Rename cloned directory to match source_dir
+        local domain_dir="$import_dir/$source_dir_value"
         if [ "$app_dir" != "$domain_dir" ] && [ -d "$app_dir" ] && [ ! -d "$domain_dir" ]; then
             mv "$app_dir" "$domain_dir"
         fi
@@ -174,7 +220,7 @@ import_from_server() {
 
         # Get builder type
         local builder=""
-        builder=$(ssh "$ssh_alias" "dokku builder:report $app" 2>/dev/null | grep "Builder selected:" | awk '{print $NF}')
+        builder=$(ssh "$ssh_alias" "dokku builder:report $app" 2>/dev/null | sed -n 's/.*Builder selected:[[:space:]]*//p' | head -n1 | xargs)
 
         # Export env vars
         if [ "$import_secrets" = true ]; then
@@ -208,7 +254,7 @@ import_from_server() {
         # Build deployment config
         local deployment_config=$(jq -n \
             --arg domain "$primary_domain" \
-            --arg source_dir "$primary_domain" \
+            --arg source_dir "$source_dir_value" \
             --arg branch "$branch" \
             --arg builder "$builder" \
             --arg postgres "$postgres" \

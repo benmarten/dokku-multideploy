@@ -1,3 +1,96 @@
+truncate_for_status() {
+    local value="$1"
+    local max_len="$2"
+    local value_len=${#value}
+
+    if [ "$value_len" -le "$max_len" ]; then
+        echo "$value"
+        return
+    fi
+
+    if [ "$max_len" -le 3 ]; then
+        echo "${value:0:$max_len}"
+        return
+    fi
+
+    echo "${value:0:$((max_len - 3))}..."
+}
+
+normalize_bool_status() {
+    local value="$1"
+    case "$value" in
+        true|yes|on|running) echo "yes" ;;
+        false|no|off|stopped) echo "no" ;;
+        *) echo "?" ;;
+    esac
+}
+
+print_live_status_summary() {
+    echo ""
+    echo -e "${BLUE}Live App Status (from dokku ps:report --all):${NC}"
+    echo "  format: domain | dep:<yes/no> run:<yes/no> procs:<count>"
+
+    local ps_report_all
+    ps_report_all=$(ssh -n "$SSH_ALIAS" '
+        apps=$(dokku apps:list 2>/dev/null | tail -n +2)
+        for app in $apps; do
+            echo "===APP:${app}==="
+            dokku ps:report "$app" 2>/dev/null || true
+        done
+    ' 2>/dev/null || true)
+    local report_available=true
+    if [ -z "$ps_report_all" ]; then
+        report_available=false
+    fi
+
+    local deployment
+    for deployment in "${FILTERED_DEPLOYMENTS[@]}"; do
+        local domain
+        domain=$(echo "$deployment" | jq -r '.domain')
+        local app_name
+        app_name=$(echo "$domain" | tr '.' '-')
+
+        local app_block
+        local app_block=""
+        if [ "$report_available" = true ]; then
+            app_block=$(echo "$ps_report_all" | awk -v app="$app_name" '
+                $0 == "===APP:" app "===" { in_block=1; next }
+                in_block && /^===APP:/ { exit }
+                in_block { print }
+            ')
+        fi
+
+        if [ -z "$app_block" ]; then
+            echo -e "  - ${YELLOW}$domain${NC} | dep:? run:? procs:?"
+            continue
+        fi
+
+        local deployed_raw
+        deployed_raw=$(echo "$app_block" | awk -F': *' '/Deployed:/{print tolower($2); exit}')
+        local status_raw
+        status_raw=$(echo "$app_block" | awk -F': *' '/Status:/{print tolower($2); exit}')
+        local process_count
+        process_count=$(echo "$app_block" | awk -F': *' '/Processes:/{print $2; exit}' | awk '{print $1}')
+        [ -z "$process_count" ] && process_count="?"
+
+        local run_raw="unknown"
+        if [[ "$status_raw" == running* ]]; then
+            run_raw="running"
+        elif [[ "$status_raw" == stopped* ]] || [[ "$status_raw" == off* ]]; then
+            run_raw="stopped"
+        fi
+
+        local deployed
+        deployed=$(normalize_bool_status "$deployed_raw")
+        local running
+        running=$(normalize_bool_status "$run_raw")
+
+        local domain_display
+        domain_display=$(truncate_for_status "$domain" 34)
+        echo "  - $domain_display | dep:$deployed run:$running procs:$process_count"
+    done
+}
+
 run_sync_check() {
     local sync_dir_resolved
     if [ -n "$SYNC_DIR" ]; then
@@ -206,6 +299,8 @@ run_sync_check() {
             extra_remote_count=$((extra_remote_count + 1))
         fi
     done < "$remote_apps_file"
+
+    print_live_status_summary
 
     echo ""
     if [ "$sync_ok" = true ]; then

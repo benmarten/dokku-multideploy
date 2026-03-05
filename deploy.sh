@@ -91,7 +91,7 @@ show_help() {
     echo "  --no-prod           Skip production deployments"
     echo "  --yes               Skip confirmation prompts (use with caution)"
     echo "  --tag <tag>         Deploy only apps with this tag (can be used multiple times)"
-    echo "  --import <dir>      Import all apps from Dokku server to <dir>"
+    echo "  --import <dir>      Import apps from Dokku server to <dir> (all apps by default)"
     echo "  --ssh <alias>       SSH alias for Dokku server (use with --import)"
     echo "  --no-secrets        Skip importing env vars (use with --import)"
     echo "  --no-clone          Skip cloning repos, only generate config.json and .env files (use with --import)"
@@ -119,6 +119,7 @@ show_help() {
     echo ""
     echo "Import from existing Dokku server:"
     echo "  $0 --import ./apps --ssh co     # Clone all apps, generate config.json"
+    echo "  $0 --import ./apps --ssh co serverecho  # Import only selected app(s)"
     echo "  $0 --import ./apps --ssh co --no-secrets # Import without env vars"
     echo ""
     echo "Backup databases and storage:"
@@ -286,7 +287,50 @@ if [ "$IMPORT_MODE" = true ]; then
         show_help
         exit 1
     fi
-    import_from_server "$IMPORT_DIR" "$IMPORT_SSH" "$IMPORT_SECRETS"
+    local_import_global_domain=""
+    local_import_letsencrypt_email=""
+    if [ -f "$CONFIG_FILE" ]; then
+        local_import_global_domain=$(jq -r '.global_domain // empty' "$CONFIG_FILE" 2>/dev/null || true)
+        local_import_letsencrypt_email=$(jq -r '.letsencrypt_email // empty' "$CONFIG_FILE" 2>/dev/null || true)
+    fi
+
+    IMPORT_GLOBAL_DOMAIN="$local_import_global_domain"     IMPORT_LETSENCRYPT_EMAIL="$local_import_letsencrypt_email"     import_from_server "$IMPORT_DIR" "$IMPORT_SSH" "$IMPORT_SECRETS" "${SELECTED_DEPLOYMENTS[@]}"
+
+    # Auto-merge missing imported app blocks into existing local config.json (safe additive merge)
+    local_import_config="$IMPORT_DIR/config.json"
+    if [ -f "$CONFIG_FILE" ] && [ -f "$local_import_config" ]; then
+        added_keys=$(jq -r -s '
+            .[0] as $local
+            | .[1] as $import
+            | ($import | to_entries
+                | map(select(.value | type == "object" and has("deployments")))
+                | map(select($local | has(.key) | not))
+                | map(.key))
+            | .[]
+        ' "$CONFIG_FILE" "$local_import_config" 2>/dev/null || true)
+
+        if [ -n "$added_keys" ]; then
+            tmp_merge=$(mktemp)
+            jq -s '
+                .[0] as $local
+                | .[1] as $import
+                | ($import | to_entries
+                    | map(select(.value | type == "object" and has("deployments")))
+                    | map(select($local | has(.key) | not))
+                    | from_entries) as $missing
+                | $local + $missing
+            ' "$CONFIG_FILE" "$local_import_config" > "$tmp_merge"
+            mv "$tmp_merge" "$CONFIG_FILE"
+
+            echo ""
+            echo -e "${GREEN}Auto-merged missing apps into $(basename "$CONFIG_FILE"):${NC}"
+            while IFS= read -r key; do
+                [ -n "$key" ] && echo -e "  ${BLUE}•${NC} $key"
+            done <<< "$added_keys"
+            echo ""
+        fi
+    fi
+
     exit 0
 fi
 
