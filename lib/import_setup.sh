@@ -68,6 +68,10 @@ import_from_server() {
         echo ""
     fi
 
+    # Discover Dokku global vhosts to filter auto-generated app hostnames
+    local dokku_global_vhosts=""
+    dokku_global_vhosts=$(ssh "$ssh_alias" "dokku domains:report --global" 2>/dev/null | awk -F': *' '/Domains global vhosts:/{print $2; exit}' | xargs || true)
+
     # Initialize config structure
     local config_json='{"ssh_alias": "'$ssh_alias'", "ssh_host": "dokku@'$ssh_host'"}'
     if [ -n "$import_global_domain" ]; then
@@ -116,6 +120,17 @@ import_from_server() {
         for domain in $domains; do
             # Ignore internal Dokku domain(s)
             if [[ "$domain" == *.dokku ]]; then
+                continue
+            fi
+            # Ignore Dokku auto-generated global-vhost aliases like <app>.<global-vhost>
+            local is_internal_global_vhost=false
+            for global_vhost in $dokku_global_vhosts; do
+                if [ "$domain" = "$app.$global_vhost" ]; then
+                    is_internal_global_vhost=true
+                    break
+                fi
+            done
+            if [ "$is_internal_global_vhost" = true ]; then
                 continue
             fi
             if [ -z "$primary_domain" ]; then
