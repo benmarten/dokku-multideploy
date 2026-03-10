@@ -33,8 +33,14 @@ backup_mysql_services() {
     echo -e "${GREEN}Backing up MySQL services${NC}"
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
+    local raw_services
     local services
-    services=$(ssh $SSH_ALIAS "dokku mysql:list 2>/dev/null | tail -n +2" 2>/dev/null | sed '/^[[:space:]]*$/d' || true)
+    raw_services=$(ssh $SSH_ALIAS "dokku mysql:list" 2>&1 || true)
+    services=$(printf '%s\n' "$raw_services" \
+        | sed -E 's/\x1B\[[0-9;]*[[:alpha:]]//g' \
+        | tr -d '\r' \
+        | grep -oE 'mysql[-_.[:alnum:]]+' \
+        | sort -u)
 
     if [ -z "$services" ]; then
         echo -e "${YELLOW}No MySQL services found${NC}"
@@ -51,7 +57,7 @@ backup_mysql_services() {
         if [ "$DRY_RUN" = true ]; then
             echo -e "${YELLOW}   [DRY RUN] Would backup to $mysql_backup${NC}"
         else
-            if ssh $SSH_ALIAS "dokku mysql:export $service" 2>/dev/null | xz -9 > "$mysql_backup"; then
+            if ssh -n $SSH_ALIAS "dokku mysql:export $service" 2>/dev/null | xz -9 > "$mysql_backup"; then
                 local size=$(du -h "$mysql_backup" | cut -f1)
                 echo -e "${GREEN}   Saved: $mysql_backup ($size)${NC}"
             else
