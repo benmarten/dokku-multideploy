@@ -420,6 +420,7 @@ for parent_type in $(jq -r 'to_entries[] | select(.value | type == "object" and 
     parent_docker_options=$(echo "$parent_config" | jq -c '.docker_options // []')
     parent_extra_domains=$(echo "$parent_config" | jq -c '.extra_domains // []')
     parent_plugins=$(echo "$parent_config" | jq -c '.plugins // []')
+    parent_dokku_settings=$(echo "$parent_config" | jq -c '.dokku_settings // {}')
     parent_postgres=$(echo "$parent_config" | jq -r '.postgres // false')
     parent_letsencrypt=$(echo "$parent_config" | jq -r '.letsencrypt // false')
 
@@ -443,6 +444,7 @@ for parent_type in $(jq -r 'to_entries[] | select(.value | type == "object" and 
             --argjson parent_docker_options "$parent_docker_options" \
             --argjson parent_extra_domains "$parent_extra_domains" \
             --argjson parent_plugins "$parent_plugins" \
+            --argjson parent_dokku_settings "$parent_dokku_settings" \
             --argjson child "$child_config" \
             '{
                 domain: $domain,
@@ -459,7 +461,8 @@ for parent_type in $(jq -r 'to_entries[] | select(.value | type == "object" and 
                 ports: (($child.ports // $parent_ports) // []),
                 docker_options: (($child.docker_options // []) + $parent_docker_options),
                 extra_domains: (($child.extra_domains // []) + $parent_extra_domains),
-                plugins: (($child.plugins // []) + $parent_plugins)
+                plugins: (($child.plugins // []) + $parent_plugins),
+                dokku_settings: ($parent_dokku_settings * ($child.dokku_settings // {}))
             }')
 
         DEPLOYMENTS+=("$merged")
