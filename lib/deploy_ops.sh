@@ -1,9 +1,56 @@
+apply_dokku_settings() {
+    local app_name=$1
+    local dokku_settings_json="$2"
+
+    if ! echo "$dokku_settings_json" | jq -e 'type == "object" and length > 0' > /dev/null 2>&1; then
+        return
+    fi
+
+    echo -e "${BLUE}Applying Dokku plugin settings...${NC}"
+
+    local plugin
+    while IFS= read -r plugin; do
+        [ -z "$plugin" ] && continue
+
+        if ! [[ "$plugin" =~ ^[a-z0-9-]+$ ]]; then
+            echo -e "${YELLOW}   Skipping invalid plugin namespace: $plugin${NC}"
+            continue
+        fi
+
+        while IFS=$'\t' read -r setting_key setting_value; do
+            [ -z "$setting_key" ] && continue
+
+            if ! [[ "$setting_key" =~ ^[a-z0-9-]+$ ]]; then
+                echo -e "${YELLOW}   Skipping invalid setting key for $plugin: $setting_key${NC}"
+                continue
+            fi
+
+            if [ -z "$setting_value" ] || [ "$setting_value" = "null" ]; then
+                continue
+            fi
+
+            local escaped_setting_value="${setting_value//\'/\'\\\'\'}"
+            echo -e "${BLUE}   dokku $plugin:set $app_name $setting_key $setting_value${NC}"
+            ssh $SSH_ALIAS "dokku $plugin:set $app_name $setting_key '$escaped_setting_value'" || true
+        done < <(echo "$dokku_settings_json" | jq -r --arg plugin "$plugin" '
+            .[$plugin] // {}
+            | to_entries[]
+            | "\(.key)\t\(.value|tostring)"
+        ')
+    done < <(echo "$dokku_settings_json" | jq -r '
+        to_entries[]
+        | select(.value | type == "object")
+        | .key
+    ')
+}
+
 apply_config_only() {
     local deployment=$1
     local domain=$(echo "$deployment" | jq -r '.domain')
     local source_dir=$(echo "$deployment" | jq -r '.source_dir')
     local app_name=$(echo "$domain" | tr '.' '-')
     local enable_letsencrypt=$(echo "$deployment" | jq -r '.letsencrypt // false')
+    local dokku_settings=$(echo "$deployment" | jq -c '.dokku_settings // {}')
 
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${GREEN}Updating config: $domain${NC}"
@@ -85,6 +132,8 @@ apply_config_only() {
         fi
     fi
 
+    apply_dokku_settings "$app_name" "$dokku_settings"
+
 
     # Apply Let's Encrypt SSL in config-only mode when requested
     if [ "$enable_letsencrypt" = "true" ]; then
@@ -156,6 +205,7 @@ deploy_app() {
     local enable_postgres=$(echo "$deployment" | jq -r '.postgres')
     local enable_letsencrypt=$(echo "$deployment" | jq -r '.letsencrypt')
     local builder_type=$(echo "$deployment" | jq -r '.builder // empty')
+    local dokku_settings=$(echo "$deployment" | jq -c '.dokku_settings // {}')
     local mysql_service_name=""
     local mysql_host=""
 
@@ -550,6 +600,8 @@ deploy_app() {
             ssh $SSH_ALIAS "dokku docker-options:add $app_name deploy '$opt'" || true
         done < <(echo "$deployment" | jq -r '.docker_options[]')
     fi
+
+    apply_dokku_settings "$app_name" "$dokku_settings"
 
     # Load secrets hierarchically: shared file first, then domain-specific
     local shared_file="$SCRIPT_DIR/.env/_$source_dir"

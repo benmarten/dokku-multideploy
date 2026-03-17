@@ -237,6 +237,18 @@ import_from_server() {
         local builder=""
         builder=$(ssh "$ssh_alias" "dokku builder:report $app" 2>/dev/null | sed -n 's/.*Builder selected:[[:space:]]*//p' | head -n1 | xargs)
 
+        # Import app-level Dokku plugin settings (currently nginx client-max-body-size).
+        local dokku_settings_json="{}"
+        local nginx_client_max_body_size
+        nginx_client_max_body_size=$(ssh "$ssh_alias" "dokku nginx:report $app 2>/dev/null | sed -n 's/^ *Nginx client max body size:[[:space:]]*//p' | head -n1 | xargs" || true)
+        if [ -n "$nginx_client_max_body_size" ]; then
+            dokku_settings_json=$(jq -n --arg size "$nginx_client_max_body_size" '{
+                nginx: {
+                    "client-max-body-size": $size
+                }
+            }')
+        fi
+
         # Export env vars
         if [ "$import_secrets" = true ]; then
             echo -e "  ${BLUE}Exporting env vars...${NC}"
@@ -278,6 +290,7 @@ import_from_server() {
             --argjson storage "$storage_json" \
             --argjson docker_options "$docker_options_json" \
             --argjson extra_domains "$extra_domains_json" \
+            --argjson dokku_settings "$dokku_settings_json" \
             '{
                 source_dir: $source_dir,
                 branch: $branch,
@@ -288,6 +301,7 @@ import_from_server() {
                 storage_mounts: (if $storage == [] then null else $storage end),
                 docker_options: (if $docker_options == [] then null else $docker_options end),
                 extra_domains: (if $extra_domains == [] then null else $extra_domains end),
+                dokku_settings: (if $dokku_settings == {} then null else $dokku_settings end),
                 deployments: {
                     ($domain): {}
                 }

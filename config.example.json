@@ -11,6 +11,11 @@
     "builder": "dockerfile",
     "postgres": true,
     "letsencrypt": true,
+    "dokku_settings": {
+      "nginx": {
+        "client-max-body-size": "100m"
+      }
+    },
     "env_vars": {
       "NODE_ENV": "production"
     },

@@ -163,7 +163,22 @@ run_sync_check() {
                     ports: (($child.ports // $parent.ports // []) | map(tostring) | sort),
                     storage_mounts: ((($child.storage_mounts // []) + ($parent.storage_mounts // [])) | map(tostring) | sort),
                     docker_options: ((($child.docker_options // []) + ($parent.docker_options // [])) | map(tostring) | sort),
-                    extra_domains: ((($child.extra_domains // []) + ($parent.extra_domains // [])) | map(tostring) | sort)
+                    extra_domains: ((($child.extra_domains // []) + ($parent.extra_domains // [])) | map(tostring) | sort),
+                    dokku_settings: (
+                        ((($parent.dokku_settings // {}) * ($child.dokku_settings // {})) // {})
+                        | to_entries
+                        | map(
+                            select(.value | type == "object")
+                            | .key as $plugin
+                            | (
+                                .value
+                                | to_entries
+                                | map("\($plugin):\(.key)=\(.value|tostring)")
+                            )
+                        )
+                        | add // []
+                        | sort
+                    )
                 }
             }
         ]
@@ -192,7 +207,22 @@ run_sync_check() {
                 | map(select(. != ""))
                 | sort),
             docker_options: ((.docker_options // []) | map(tostring) | sort),
-            extra_domains: ((.extra_domains // []) | map(tostring) | sort)
+            extra_domains: ((.extra_domains // []) | map(tostring) | sort),
+            dokku_settings: (
+                (.dokku_settings // {})
+                | to_entries
+                | map(
+                    select(.value | type == "object")
+                    | .key as $plugin
+                    | (
+                        .value
+                        | to_entries
+                        | map("\($plugin):\(.key)=\(.value|tostring)")
+                    )
+                )
+                | add // []
+                | sort
+            )
         }')
 
         local remote_domain
@@ -219,7 +249,7 @@ run_sync_check() {
 
         local diff_fields=()
         local field
-        for field in branch builder postgres letsencrypt ports storage_mounts docker_options extra_domains; do
+        for field in branch builder postgres letsencrypt ports storage_mounts docker_options extra_domains dokku_settings; do
             local local_val
             local remote_val
             local_val=$(echo "$local_summary" | jq -c ".$field")

@@ -239,6 +239,7 @@ your-project/
 | `ports` | Array of port mappings (`"http:80:3000"`) |
 | `extra_domains` | Additional domains to add |
 | `plugins` | Dokku plugins to install |
+| `dokku_settings` | Generic Dokku plugin settings map (for example `{"nginx":{"client-max-body-size":"100m"}}`) |
 
 #### Deployment Level
 Same options as parent level, plus:
@@ -247,6 +248,25 @@ Same options as parent level, plus:
 | `tags` | Array of tags for filtering (`["production", "api"]`) |
 
 Child settings override parent settings.
+
+### Dokku Settings Map
+
+Use `dokku_settings` when you want config-driven `dokku <plugin>:set` behavior:
+
+```json
+{
+  "dokku_settings": {
+    "nginx": {
+      "client-max-body-size": "100m"
+    }
+  }
+}
+```
+
+Notes:
+- Parent and deployment `dokku_settings` are merged (deployment overrides parent per key).
+- Keys are applied as `dokku <plugin>:set <app> <key> <value>` during deploy and `--config-only`.
+- `--sync` now compares `dokku_settings` as part of drift detection.
 
 ### Secrets (.env files)
 
