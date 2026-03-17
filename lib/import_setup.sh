@@ -240,8 +240,9 @@ import_from_server() {
         # Import app-level Dokku plugin settings (currently nginx client-max-body-size).
         local dokku_settings_json="{}"
         local nginx_client_max_body_size
-        nginx_client_max_body_size=$(ssh "$ssh_alias" "dokku nginx:report $app 2>/dev/null | sed -n 's/^ *Nginx client max body size:[[:space:]]*//p' | head -n1 | xargs" || true)
-        if [ -n "$nginx_client_max_body_size" ]; then
+        nginx_client_max_body_size=$(ssh "$ssh_alias" "dokku nginx:report $app" 2>/dev/null | sed -n 's/^ *Nginx client max body size:[[:space:]]*//p' | head -n1 | xargs)
+        # Skip Dokku's default 1m to avoid false drift when config does not set this explicitly.
+        if [ -n "$nginx_client_max_body_size" ] && [ "$nginx_client_max_body_size" != "1m" ]; then
             dokku_settings_json=$(jq -n --arg size "$nginx_client_max_body_size" '{
                 nginx: {
                     "client-max-body-size": $size

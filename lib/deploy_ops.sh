@@ -134,7 +134,6 @@ apply_config_only() {
 
     apply_dokku_settings "$app_name" "$dokku_settings"
 
-
     # Apply Let's Encrypt SSL in config-only mode when requested
     if [ "$enable_letsencrypt" = "true" ]; then
         echo -e "${BLUE}Checking SSL configuration...${NC}"

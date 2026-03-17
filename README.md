@@ -267,6 +267,7 @@ Notes:
 - Parent and deployment `dokku_settings` are merged (deployment overrides parent per key).
 - Keys are applied as `dokku <plugin>:set <app> <key> <value>` during deploy and `--config-only`.
 - `--sync` now compares `dokku_settings` as part of drift detection.
+- Import support currently captures `nginx.client-max-body-size` only; other plugin settings are still deploy-only unless you add custom import logic.
 
 ### Secrets (.env files)
 
