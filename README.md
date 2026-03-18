@@ -291,10 +291,12 @@ Use root-level `mysql_expose` to declare local-only binds for Dokku MySQL servic
 ```
 
 Behavior:
-- Applied after deployment/config updates.
-- Runs `dokku mysql:expose <service> <bind>` only when mapping is missing.
-- Accepts binds in the form `127.0.0.1:<port>` or `0.0.0.0:<port>`.
+- Applied after deployment/config updates, in both full deploy and `--config-only` mode.
+- Skips the service if the desired bind is already active.
+- If a different bind exists, unexposes all current bindings and re-exposes with the configured address.
+- Accepts binds in the form `127.0.0.1:<port>` or `0.0.0.0:<port>` where port is 1–65535.
 - If a listed service does not exist, deploy continues with a warning.
+- In `--dry-run` mode, prints the command that would run without executing it.
 
 For local clients like DBeaver, prefer `127.0.0.1:<port>` and connect through SSH tunnel:
 
@@ -302,7 +304,7 @@ For local clients like DBeaver, prefer `127.0.0.1:<port>` and connect through SS
 ssh -N -L 13306:127.0.0.1:3306 -L 13307:127.0.0.1:3307 <ssh-alias>
 ```
 
-Then connect to `127.0.0.1` using local ports (`13306`, `13307`, ...).
+Then connect to `127.0.0.1` using local ports (`13306`, `13307`, ...). Local port numbers are arbitrary — choose values that do not conflict with services already bound on your workstation.
 
 ### Secrets (.env files)
 

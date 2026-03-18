@@ -48,13 +48,23 @@ apply_mysql_expose_config() {
     local config_file="$1"
     local mysql_expose_json
 
-    mysql_expose_json=$(jq -c '.mysql_expose // {}' "$config_file" 2>/dev/null || echo "{}")
+    if [ ! -f "$config_file" ]; then
+        echo -e "${RED}apply_mysql_expose_config: config file not found: $config_file${NC}"
+        return 1
+    fi
+    if ! jq -e '.' "$config_file" > /dev/null 2>&1; then
+        echo -e "${RED}apply_mysql_expose_config: config file is not valid JSON: $config_file${NC}"
+        return 1
+    fi
+
+    mysql_expose_json=$(jq -c '.mysql_expose // {}' "$config_file")
     if ! echo "$mysql_expose_json" | jq -e 'type == "object" and length > 0' > /dev/null 2>&1; then
         return 0
     fi
 
     echo -e "${BLUE}Ensuring MySQL service exposure...${NC}"
 
+    local had_failure=false
     local service_name
     local bind_address
     while IFS=$'\t' read -r service_name bind_address; do
@@ -83,15 +93,21 @@ apply_mysql_expose_config() {
         fi
 
         if ! ssh -n "$SSH_ALIAS" "dokku mysql:exists $service_name" > /dev/null 2>&1; then
-            echo -e "${YELLOW}MySQL service not found, skipping exposure: $service_name${NC}"
+            echo -e "${YELLOW}MySQL service '$service_name' not found or unreachable, skipping exposure${NC}"
+            echo -e "${YELLOW}   Verify with: ssh $SSH_ALIAS dokku mysql:exists $service_name${NC}"
             continue
         fi
 
         local service_ports=""
         local service_ports_list=""
-        service_ports=$(ssh -n "$SSH_ALIAS" "dokku mysql:info $service_name 2>/dev/null | sed -n 's/^ *Exposed ports: *//p' | head -n 1" || true)
+        if ! service_ports=$(ssh -n "$SSH_ALIAS" "dokku mysql:info $service_name 2>/dev/null | sed -n 's/^ *Exposed ports: *//p' | head -n 1"); then
+            echo -e "${RED}   Failed to query exposed ports for $service_name — skipping${NC}"
+            had_failure=true
+            continue
+        fi
         service_ports_list=$(echo "$service_ports" | tr ',' '\n' | tr -d ' ')
 
+        # Check both "3306->host:port" (Dokku default format) and bare "host:port" (some plugin versions)
         if echo "$service_ports_list" | grep -Fxq "3306->$bind_address" || echo "$service_ports_list" | grep -Fxq "$bind_address"; then
             echo -e "${GREEN}   MySQL service already exposed: $service_name -> $bind_address${NC}"
             continue
@@ -105,7 +121,17 @@ apply_mysql_expose_config() {
                 if [[ "$exposed_port" == *"->"* ]]; then
                     host_binding="${exposed_port#*->}"
                 fi
-                ssh -n "$SSH_ALIAS" "dokku mysql:unexpose $service_name $host_binding" > /dev/null 2>&1 || true
+                if [ -z "$host_binding" ]; then
+                    echo -e "${RED}   Could not parse binding from port entry '$exposed_port' for $service_name — skipping unexpose${NC}"
+                    had_failure=true
+                    continue
+                fi
+                if ! ssh -n "$SSH_ALIAS" "dokku mysql:unexpose $service_name $host_binding" > /dev/null 2>&1; then
+                    echo -e "${RED}   Failed to unexpose $service_name ($host_binding) — skipping re-expose to avoid inconsistent state${NC}"
+                    echo -e "${RED}   Run manually: ssh $SSH_ALIAS dokku mysql:unexpose $service_name $host_binding${NC}"
+                    had_failure=true
+                    continue 2
+                fi
             done <<< "$service_ports_list"
         fi
 
@@ -113,14 +139,16 @@ apply_mysql_expose_config() {
         if ssh -n "$SSH_ALIAS" "dokku mysql:expose $service_name $bind_address" > /dev/null 2>&1; then
             echo -e "${GREEN}   Exposed: $service_name -> $bind_address${NC}"
         else
-            # If expose returned non-zero but mapping is present now, treat as success.
+            # Expose returned non-zero; re-check state in case it was applied anyway (idempotency guard).
+            # If still missing, record failure but continue to remaining services.
             service_ports=$(ssh -n "$SSH_ALIAS" "dokku mysql:info $service_name 2>/dev/null | sed -n 's/^ *Exposed ports: *//p' | head -n 1" || true)
             service_ports_list=$(echo "$service_ports" | tr ',' '\n' | tr -d ' ')
             if echo "$service_ports_list" | grep -Fxq "3306->$bind_address" || echo "$service_ports_list" | grep -Fxq "$bind_address"; then
                 echo -e "${GREEN}   MySQL exposure already present after command: $service_name -> $bind_address${NC}"
             else
-                echo -e "${YELLOW}   Failed to expose $service_name on $bind_address${NC}"
-                echo -e "${YELLOW}   Run manually: ssh $SSH_ALIAS dokku mysql:expose $service_name $bind_address${NC}"
+                echo -e "${RED}   Failed to expose $service_name on $bind_address${NC}"
+                echo -e "${RED}   Run manually: ssh $SSH_ALIAS dokku mysql:expose $service_name $bind_address${NC}"
+                had_failure=true
             fi
         fi
     done < <(echo "$mysql_expose_json" | jq -r '
@@ -130,6 +158,7 @@ apply_mysql_expose_config() {
     ')
 
     echo ""
+    [ "$had_failure" = true ] && return 1
     return 0
 }
 
