@@ -44,6 +44,95 @@ apply_dokku_settings() {
     ')
 }
 
+apply_mysql_expose_config() {
+    local config_file="$1"
+    local mysql_expose_json
+
+    mysql_expose_json=$(jq -c '.mysql_expose // {}' "$config_file" 2>/dev/null || echo "{}")
+    if ! echo "$mysql_expose_json" | jq -e 'type == "object" and length > 0' > /dev/null 2>&1; then
+        return 0
+    fi
+
+    echo -e "${BLUE}Ensuring MySQL service exposure...${NC}"
+
+    local service_name
+    local bind_address
+    while IFS=$'\t' read -r service_name bind_address; do
+        [ -z "$service_name" ] && continue
+
+        if ! [[ "$service_name" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+            echo -e "${RED}Invalid mysql_expose service name: $service_name${NC}"
+            return 1
+        fi
+
+        if ! [[ "$bind_address" =~ ^(127\.0\.0\.1|0\.0\.0\.0):[0-9]{1,5}$ ]]; then
+            echo -e "${RED}Invalid mysql_expose bind address for $service_name: $bind_address${NC}"
+            echo -e "${YELLOW}Expected format: 127.0.0.1:3306${NC}"
+            return 1
+        fi
+
+        local bind_port="${bind_address##*:}"
+        if [ "$bind_port" -lt 1 ] || [ "$bind_port" -gt 65535 ]; then
+            echo -e "${RED}Invalid mysql_expose port for $service_name: $bind_port${NC}"
+            return 1
+        fi
+
+        if [ "$DRY_RUN" = true ]; then
+            echo -e "${YELLOW}[DRY RUN] Would run: dokku mysql:expose $service_name $bind_address${NC}"
+            continue
+        fi
+
+        if ! ssh -n "$SSH_ALIAS" "dokku mysql:exists $service_name" > /dev/null 2>&1; then
+            echo -e "${YELLOW}MySQL service not found, skipping exposure: $service_name${NC}"
+            continue
+        fi
+
+        local service_ports=""
+        local service_ports_list=""
+        service_ports=$(ssh -n "$SSH_ALIAS" "dokku mysql:info $service_name 2>/dev/null | sed -n 's/^ *Exposed ports: *//p' | head -n 1" || true)
+        service_ports_list=$(echo "$service_ports" | tr ',' '\n' | tr -d ' ')
+
+        if echo "$service_ports_list" | grep -Fxq "3306->$bind_address" || echo "$service_ports_list" | grep -Fxq "$bind_address"; then
+            echo -e "${GREEN}   MySQL service already exposed: $service_name -> $bind_address${NC}"
+            continue
+        fi
+
+        if [ -n "$service_ports_list" ]; then
+            echo -e "${BLUE}   Reconfiguring exposure for $service_name (current: $service_ports)${NC}"
+            while IFS= read -r exposed_port; do
+                [ -z "$exposed_port" ] && continue
+                local host_binding="$exposed_port"
+                if [[ "$exposed_port" == *"->"* ]]; then
+                    host_binding="${exposed_port#*->}"
+                fi
+                ssh -n "$SSH_ALIAS" "dokku mysql:unexpose $service_name $host_binding" > /dev/null 2>&1 || true
+            done <<< "$service_ports_list"
+        fi
+
+        echo -e "${BLUE}   Exposing MySQL service: $service_name -> $bind_address${NC}"
+        if ssh -n "$SSH_ALIAS" "dokku mysql:expose $service_name $bind_address" > /dev/null 2>&1; then
+            echo -e "${GREEN}   Exposed: $service_name -> $bind_address${NC}"
+        else
+            # If expose returned non-zero but mapping is present now, treat as success.
+            service_ports=$(ssh -n "$SSH_ALIAS" "dokku mysql:info $service_name 2>/dev/null | sed -n 's/^ *Exposed ports: *//p' | head -n 1" || true)
+            service_ports_list=$(echo "$service_ports" | tr ',' '\n' | tr -d ' ')
+            if echo "$service_ports_list" | grep -Fxq "3306->$bind_address" || echo "$service_ports_list" | grep -Fxq "$bind_address"; then
+                echo -e "${GREEN}   MySQL exposure already present after command: $service_name -> $bind_address${NC}"
+            else
+                echo -e "${YELLOW}   Failed to expose $service_name on $bind_address${NC}"
+                echo -e "${YELLOW}   Run manually: ssh $SSH_ALIAS dokku mysql:expose $service_name $bind_address${NC}"
+            fi
+        fi
+    done < <(echo "$mysql_expose_json" | jq -r '
+        to_entries[]
+        | select(.value != null)
+        | "\(.key)\t\(.value|tostring)"
+    ')
+
+    echo ""
+    return 0
+}
+
 apply_config_only() {
     local deployment=$1
     local domain=$(echo "$deployment" | jq -r '.domain')

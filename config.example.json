@@ -2,6 +2,11 @@
   "ssh_host": "dokku@your-server.com",
   "ssh_alias": "dokku",
   "global_domain": "example.com",
+  "mysql_expose": {
+    "mysql-prod": "127.0.0.1:3306",
+    "mysql-staging": "127.0.0.1:3307",
+    "mysql-test": "127.0.0.1:3308"
+  },
   "letsencrypt_email": "admin@example.com",
 
   "api": {

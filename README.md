@@ -12,6 +12,7 @@ Deploy multiple applications to a single Dokku server with centralized configura
 - **Tag-based filtering** - Deploy subsets by tag (`--tag staging`, `--tag api`)
 - **PostgreSQL auto-setup** - Opt-in automatic database provisioning
 - **Let's Encrypt SSL** - Opt-in automatic SSL certificate provisioning
+- **MySQL service exposure** - Optional `mysql:expose` automation for local-only DB access
 - **Storage mounts, ports, domains** - Full Dokku configuration support
 - **Server import/migration** - Import all apps from existing server, migrate to new server
 - **Backup & Restore** - Backup/restore PostgreSQL databases and storage mounts with xz compression
@@ -185,6 +186,12 @@ your-project/
   "ssh_alias": "<ssh-alias>",
   "global_domain": "example.com",
   "letsencrypt_email": "admin@example.com",
+  "mysql_expose": {
+    "mysql-prod": "127.0.0.1:3306",
+    "mysql-staging": "127.0.0.1:3307",
+    "mysql-test": "127.0.0.1:3308",
+    "mysql-test-v2": "127.0.0.1:3309"
+  },
 
   "api": {
     "source_dir": "api",
@@ -223,6 +230,7 @@ your-project/
 | `ssh_alias` | SSH alias for commands (e.g., `dokku` if configured in `~/.ssh/config`) |
 | `global_domain` | Base domain used to synthesize app domains during import when only `.dokku` exists |
 | `letsencrypt_email` | Global email used for Let's Encrypt certificate requests |
+| `mysql_expose` | Map of MySQL service name to bind address for `dokku mysql:expose` (e.g., `{"mysql-prod":"127.0.0.1:3306"}`) |
 
 #### Parent Level (e.g., "api", "web")
 | Key | Description |
@@ -268,6 +276,33 @@ Notes:
 - Keys are applied as `dokku <plugin>:set <app> <key> <value>` during deploy and `--config-only`.
 - `--sync` now compares `dokku_settings` as part of drift detection.
 - Import support currently captures `nginx.client-max-body-size` only; other plugin settings are still deploy-only unless you add custom import logic.
+
+### MySQL Service Exposure
+
+Use root-level `mysql_expose` to declare local-only binds for Dokku MySQL services:
+
+```json
+{
+  "mysql_expose": {
+    "mysql-prod": "127.0.0.1:3306",
+    "mysql-staging": "127.0.0.1:3307"
+  }
+}
+```
+
+Behavior:
+- Applied after deployment/config updates.
+- Runs `dokku mysql:expose <service> <bind>` only when mapping is missing.
+- Accepts binds in the form `127.0.0.1:<port>` or `0.0.0.0:<port>`.
+- If a listed service does not exist, deploy continues with a warning.
+
+For local clients like DBeaver, prefer `127.0.0.1:<port>` and connect through SSH tunnel:
+
+```bash
+ssh -N -L 13306:127.0.0.1:3306 -L 13307:127.0.0.1:3307 <ssh-alias>
+```
+
+Then connect to `127.0.0.1` using local ports (`13306`, `13307`, ...).
 
 ### Secrets (.env files)
 

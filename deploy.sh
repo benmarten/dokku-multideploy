@@ -705,6 +705,11 @@ for deployment in "${FILTERED_DEPLOYMENTS[@]}"; do
     fi
 done
 
+if ! apply_mysql_expose_config "$CONFIG_FILE"; then
+    echo -e "${RED}Failed to apply mysql_expose configuration${NC}"
+    exit 1
+fi
+
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${GREEN}All deployments complete!${NC}"
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
