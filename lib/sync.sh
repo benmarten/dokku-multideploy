@@ -25,6 +25,68 @@ normalize_bool_status() {
     esac
 }
 
+sync_apply_summary_to_child_patch() {
+    local remote_summary="$1"
+    local diff_fields_json="$2"
+    echo "$remote_summary" | jq -c --argjson diff_fields "$diff_fields_json" '
+        def settings_from_lines:
+            (map(capture("^(?<plugin>[^:]+):(?<key>[^=]+)=(?<value>.*)$"))
+            | reduce .[] as $entry ({}; .[$entry.plugin] = ((.[$entry.plugin] // {}) + {($entry.key): $entry.value})));
+        {
+            branch: (.branch // null),
+            builder: (.builder // null),
+            postgres: (if .postgres == true then true else null end),
+            letsencrypt: (if .letsencrypt == true then true else null end),
+            ports: (if (.ports | length) > 0 then .ports else null end),
+            storage_mounts: (if (.storage_mounts | length) > 0 then .storage_mounts else null end),
+            docker_options: (if (.docker_options | length) > 0 then .docker_options else null end),
+            extra_domains: (if (.extra_domains | length) > 0 then .extra_domains else null end),
+            dokku_settings: (if (.dokku_settings | length) > 0 then (.dokku_settings | settings_from_lines) else null end)
+        }
+        | with_entries(select($diff_fields | index(.key)))
+    '
+}
+
+apply_sync_patch_to_config() {
+    local domain="$1"
+    local child_patch="$2"
+
+    local tmp_file
+    tmp_file=$(mktemp "${TMPDIR:-/tmp}/dokku-sync-apply.XXXXXX")
+
+    if ! jq --arg domain "$domain" --argjson patch "$child_patch" '
+        reduce (to_entries[]
+            | select(.value | type == "object" and has("deployments"))
+            | select(.value.deployments | has($domain))
+            | .key) as $parent_key
+            (.;
+                .[$parent_key].deployments[$domain] |= (
+                    . as $child
+                    | (if ($patch | has("branch")) then (if ($patch.branch == null) then del(.branch) else .branch = $patch.branch end) else . end)
+                    | (if ($patch | has("builder")) then (if ($patch.builder == null) then del(.builder) else .builder = $patch.builder end) else . end)
+                    | (if ($patch | has("postgres")) then (if ($patch.postgres == null) then del(.postgres) else .postgres = true end) else . end)
+                    | (if ($patch | has("letsencrypt")) then (if ($patch.letsencrypt == null) then del(.letsencrypt) else .letsencrypt = true end) else . end)
+                    | (if ($patch | has("ports")) then (if ($patch.ports == null) then del(.ports) else .ports = $patch.ports end) else . end)
+                    | (if ($patch | has("storage_mounts")) then (if ($patch.storage_mounts == null) then del(.storage_mounts) else .storage_mounts = $patch.storage_mounts end) else . end)
+                    | (if ($patch | has("docker_options")) then (if ($patch.docker_options == null) then del(.docker_options) else .docker_options = $patch.docker_options end) else . end)
+                    | (if ($patch | has("extra_domains")) then (if ($patch.extra_domains == null) then del(.extra_domains) else .extra_domains = $patch.extra_domains end) else . end)
+                    | (if ($patch | has("dokku_settings")) then (if ($patch.dokku_settings == null) then del(.dokku_settings) else .dokku_settings = $patch.dokku_settings end) else . end)
+                )
+            )
+    ' "$CONFIG_FILE" > "$tmp_file"; then
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    if cmp -s "$CONFIG_FILE" "$tmp_file"; then
+        rm -f "$tmp_file"
+        return 2
+    fi
+
+    mv "$tmp_file" "$CONFIG_FILE"
+    return 0
+}
+
 print_live_status_summary() {
     echo ""
     echo -e "${BLUE}Live App Status (from dokku ps:report --all):${NC}"
@@ -112,6 +174,10 @@ run_sync_check() {
     local mismatch_count=0
     local local_apps_file="$compare_tmp_dir/local_apps.txt"
     local remote_apps_file="$compare_tmp_dir/remote_apps.txt"
+    local applied_count=0
+    local apply_failed_count=0
+    local apply_preview_count=0
+    local sync_apply_backup=""
 
     echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
     echo -e "${BLUE}   dokku-multideploy - Sync Check${NC}"
@@ -187,6 +253,18 @@ run_sync_check() {
     echo -e "${BLUE}Comparing local config with live Dokku state...${NC}"
     echo ""
 
+    if [ "$SYNC_APPLY" = true ]; then
+        if [ "$DRY_RUN" = true ]; then
+            echo -e "${YELLOW}SYNC APPLY DRY RUN - Showing what would be patched into config.json${NC}"
+            echo ""
+        else
+            sync_apply_backup="$CONFIG_FILE.sync-bak-$(date +%Y%m%d-%H%M%S)"
+            cp "$CONFIG_FILE" "$sync_apply_backup"
+            echo -e "${BLUE}Backup created:${NC} $sync_apply_backup"
+            echo ""
+        fi
+    fi
+
     for deployment in "${FILTERED_DEPLOYMENTS[@]}"; do
         local domain
         domain=$(echo "$deployment" | jq -r '.domain')
@@ -249,16 +327,13 @@ run_sync_check() {
 
         local diff_fields=()
         local field
-        for field in branch builder postgres letsencrypt ports storage_mounts docker_options extra_domains dokku_settings; do
+        # Branch is intentionally excluded from sync drift checks: config branch selects
+        # source code branch, while Dokku deploy branch is standardized to master.
+        for field in builder postgres letsencrypt ports storage_mounts docker_options extra_domains dokku_settings; do
             local local_val
             local remote_val
             local_val=$(echo "$local_summary" | jq -c ".$field")
             remote_val=$(echo "$remote_summary" | jq -c ".$field")
-
-            # If branch is not explicitly set locally, accept Dokku's current branch.
-            if [ "$field" = "branch" ] && [ "$local_val" = "null" ]; then
-                continue
-            fi
 
             # Treat default single http mapping as equivalent to unset ports.
             if [ "$field" = "ports" ]; then
@@ -305,8 +380,41 @@ run_sync_check() {
                 echo -e "     local : $local_val"
                 echo -e "     dokku : $remote_val"
             done
-            mismatch_count=$((mismatch_count + 1))
-            sync_ok=false
+
+            if [ "$SYNC_APPLY" = true ]; then
+                local child_patch
+                local diff_fields_json
+                diff_fields_json=$(printf '%s\n' "${diff_fields[@]}" | jq -R . | jq -s .)
+                child_patch=$(sync_apply_summary_to_child_patch "$remote_summary" "$diff_fields_json")
+                if [ "$DRY_RUN" = true ]; then
+                    echo -e "   ${BLUE}apply${NC}"
+                    echo -e "     mode  : dry-run"
+                    echo -e "     patch : $child_patch"
+                    apply_preview_count=$((apply_preview_count + 1))
+                    mismatch_count=$((mismatch_count + 1))
+                    sync_ok=false
+                elif apply_sync_patch_to_config "$domain" "$child_patch"; then
+                    echo -e "   ${GREEN}apply${NC}"
+                    echo -e "     result: patched local config.json"
+                    applied_count=$((applied_count + 1))
+                else
+                    local patch_rc=$?
+                    if [ "$patch_rc" -eq 2 ]; then
+                        echo -e "   ${GREEN}apply${NC}"
+                        echo -e "     result: no local file change required"
+                        applied_count=$((applied_count + 1))
+                    else
+                        echo -e "   ${RED}apply${NC}"
+                        echo -e "     result: failed to patch local config.json"
+                        apply_failed_count=$((apply_failed_count + 1))
+                        mismatch_count=$((mismatch_count + 1))
+                        sync_ok=false
+                    fi
+                fi
+            else
+                mismatch_count=$((mismatch_count + 1))
+                sync_ok=false
+            fi
         fi
     done
 
@@ -340,6 +448,16 @@ run_sync_check() {
         echo -e "  Missing on Dokku: ${RED}$missing_count${NC}"
         echo -e "  Config drift:     ${YELLOW}$mismatch_count${NC}"
         echo -e "  Extra on Dokku:   ${YELLOW}$extra_remote_count${NC}"
+    fi
+    if [ "$SYNC_APPLY" = true ]; then
+        if [ "$DRY_RUN" = true ]; then
+            echo -e "  Sync apply (dry): ${YELLOW}$apply_preview_count${NC}"
+        else
+            echo -e "  Sync apply:       ${GREEN}$applied_count${NC} patched, ${RED}$apply_failed_count${NC} failed"
+            if [ -n "$sync_apply_backup" ]; then
+                echo -e "  Backup file:      ${BLUE}$sync_apply_backup${NC}"
+            fi
+        fi
     fi
 
     rm -rf "$compare_tmp_dir"
