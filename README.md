@@ -369,6 +369,12 @@ Compare local `config.json` against live Dokku state without deploying:
 
 # Clear cache and re-import
 ./deploy.sh --sync --reset-sync
+
+# Patch local config.json from live Dokku values
+./deploy.sh --sync --sync-apply
+
+# Preview patch changes without writing
+./deploy.sh --sync --sync-apply --dry-run
 ```
 
 `--sync` behavior:
@@ -378,11 +384,13 @@ Compare local `config.json` against live Dokku state without deploying:
    - `✓ In sync`
    - `✗ Missing on Dokku`
    - `⚠ Drift` with per-field differences
+4. `branch` is ignored in drift detection (local `branch` is source selection; Dokku deploy target is standardized to `master`)
 
 Cache options:
 - `--refresh-sync`: refresh `.sync-cache/config.json` before comparing
 - `--reset-sync`: clear the sync cache directory, then import fresh
 - `--sync-dir <dir>`: use a custom cache directory
+- `--sync-apply`: write drifted fields from Dokku into deployment-level entries in local `config.json`
 
 Exit codes:
 - `0`: all selected deployments are in sync

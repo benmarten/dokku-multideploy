@@ -76,6 +76,7 @@ SYNC_MODE=false
 SYNC_DIR=""
 SYNC_REFRESH=false
 SYNC_RESET=false
+SYNC_APPLY=false
 FILTER_TAGS=()
 SELECTED_DEPLOYMENTS=()
 
@@ -104,6 +105,7 @@ show_help() {
     echo "  --sync-dir <dir>    Directory to store/reuse imported sync state"
     echo "  --refresh-sync      Re-import Dokku state before sync check"
     echo "  --reset-sync        Clear sync cache directory before importing"
+    echo "  --sync-apply        Apply detected drift from Dokku into local config.json"
     echo "  --help              Show this help message"
     echo ""
     echo "Examples:"
@@ -135,6 +137,7 @@ show_help() {
     echo "  $0 --setup                              # Interactive setup (prompts for email)"
     echo "  $0 --sync                               # Check config drift against Dokku"
     echo "  $0 --sync --refresh-sync                # Force refresh live state first"
+    echo "  $0 --sync --sync-apply                  # Patch local config from Dokku"
     echo "  $0 --sync --sync-dir .sync-cache        # Reuse specific sync cache dir"
     echo ""
 }
@@ -229,6 +232,10 @@ while [[ $# -gt 0 ]]; do
             SYNC_RESET=true
             shift
             ;;
+        --sync-apply)
+            SYNC_APPLY=true
+            shift
+            ;;
         --help|-h)
             show_help
             exit 0
@@ -250,8 +257,8 @@ if [ "$SYNC_MODE" = true ] && { [ "$IMPORT_MODE" = true ] || [ "$SETUP_MODE" = t
     exit 1
 fi
 
-if [ "$SYNC_MODE" = false ] && { [ -n "$SYNC_DIR" ] || [ "$SYNC_REFRESH" = true ] || [ "$SYNC_RESET" = true ]; }; then
-    echo -e "${RED}Error: --sync-dir, --refresh-sync, and --reset-sync require --sync${NC}"
+if [ "$SYNC_MODE" = false ] && { [ -n "$SYNC_DIR" ] || [ "$SYNC_REFRESH" = true ] || [ "$SYNC_RESET" = true ] || [ "$SYNC_APPLY" = true ]; }; then
+    echo -e "${RED}Error: --sync-dir, --refresh-sync, --reset-sync, and --sync-apply require --sync${NC}"
     exit 1
 fi
 

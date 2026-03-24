@@ -454,11 +454,8 @@ deploy_app() {
     # Check if deployment is needed by comparing local and remote commits
     echo -e "${BLUE}Checking if deployment is needed...${NC}"
 
-    # Detect Dokku's deploy branch for this app (defaults to master)
-    local dokku_branch=$(ssh $SSH_ALIAS "dokku git:report $app_name 2>/dev/null | grep 'Git deploy branch:' | awk '{print \$NF}'" || echo "master")
-    if [ -z "$dokku_branch" ] || [ "$dokku_branch" = "deploy" ]; then
-        dokku_branch="master"
-    fi
+    # Dokku deploy target is standardized to master for all apps.
+    local dokku_branch="master"
 
     # Fetch remote state quietly
     git fetch "$remote_name" "$dokku_branch" 2>/dev/null || true
@@ -513,6 +510,8 @@ deploy_app() {
     # Create app if doesn't exist
     echo -e "${BLUE}Ensuring app exists on Dokku...${NC}"
     ssh $SSH_ALIAS "dokku apps:exists $app_name || dokku apps:create $app_name" || true
+    echo -e "${BLUE}Ensuring Dokku deploy branch is master...${NC}"
+    ssh $SSH_ALIAS "dokku git:set $app_name deploy-branch master" >/dev/null 2>&1 || true
 
     # Configure Dokku builder if explicitly set in config
     if [ -n "$builder_type" ]; then
