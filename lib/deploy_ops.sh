@@ -417,9 +417,25 @@ deploy_app() {
     # Checkout branch if not already on it
     if [ "$current_branch" != "$repo_branch" ]; then
         if ! git checkout "$repo_branch" 2>/dev/null; then
-            echo -e "${RED}Error: Cannot checkout branch '$repo_branch'${NC}"
-            cd "$SCRIPT_DIR"
-            return 1
+            echo -e "${YELLOW}Warning: Cannot checkout configured branch '$repo_branch'${NC}"
+            local detected_branch=""
+            detected_branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')
+            if [ -z "$detected_branch" ]; then
+                if git rev-parse --verify origin/main >/dev/null 2>&1; then
+                    detected_branch="main"
+                elif git rev-parse --verify origin/master >/dev/null 2>&1; then
+                    detected_branch="master"
+                fi
+            fi
+
+            if [ -n "$detected_branch" ] && git checkout "$detected_branch" 2>/dev/null; then
+                echo -e "${YELLOW}Using auto-detected branch '$detected_branch' instead${NC}"
+                repo_branch="$detected_branch"
+            else
+                echo -e "${RED}Error: Cannot checkout branch '$repo_branch'${NC}"
+                cd "$SCRIPT_DIR"
+                return 1
+            fi
         fi
     fi
 
