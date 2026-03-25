@@ -876,22 +876,76 @@ deploy_app() {
     local max_attempts=12
     local attempt=0
     local health_check_passed=false
+    local health_host=""
+    local health_proto=""
+    local health_status=""
+    local health_targets=()
+
+    add_health_target() {
+        local candidate="$1"
+        candidate="${candidate%,}"
+        candidate="${candidate#http://}"
+        candidate="${candidate#https://}"
+        candidate="${candidate%%/*}"
+        if [ -z "$candidate" ] || [[ "$candidate" == *"*"* ]]; then
+            return
+        fi
+        for existing in "${health_targets[@]}"; do
+            if [ "$existing" = "$candidate" ]; then
+                return
+            fi
+        done
+        health_targets+=("$candidate")
+    }
+
+    # 1) Prefer explicitly configured public domains.
+    while IFS= read -r extra_domain; do
+        [ -n "$extra_domain" ] && add_health_target "$extra_domain"
+    done < <(echo "$deployment" | jq -r '.extra_domains // [] | .[]')
+
+    # 2) If the deployment key is already a hostname (contains a dot), include it.
+    if [[ "$domain" == *.* ]]; then
+        add_health_target "$domain"
+    fi
+
+    # 3) Include Dokku-reported vhosts (best-effort).
+    local reported_vhosts
+    reported_vhosts=$(ssh -n $SSH_ALIAS "dokku domains:report $app_name 2>/dev/null | sed -n 's/^ *Domains .* vhosts:[[:space:]]*//p'" 2>/dev/null || true)
+    for host in $reported_vhosts; do
+        add_health_target "$host"
+    done
+
+    # 4) Last fallback to legacy behavior.
+    if [ ${#health_targets[@]} -eq 0 ]; then
+        add_health_target "$domain"
+    fi
 
     while [ $attempt -lt $max_attempts ]; do
         attempt=$((attempt + 1))
 
-        # Try HTTPS first (preferred), then fall back to HTTP
-        local https_code=$(curl -s -o /dev/null -w "%{http_code}" "https://$domain" --max-time 5 2>/dev/null || echo "000")
-        if [ -n "$https_code" ] && [ "$https_code" -ge 200 ] && [ "$https_code" -lt 400 ]; then
-            health_check_passed=true
-            echo -e "${GREEN}Health check passed via HTTPS (status: $https_code, attempt $attempt/$max_attempts)${NC}"
-            break
-        fi
+        for host in "${health_targets[@]}"; do
+            # Try HTTPS first (preferred), then fall back to HTTP
+            local https_code=$(curl -s -o /dev/null -w "%{http_code}" "https://$host" --max-time 5 2>/dev/null || echo "000")
+            if [ -n "$https_code" ] && [ "$https_code" -ge 200 ] && [ "$https_code" -lt 400 ]; then
+                health_check_passed=true
+                health_host="$host"
+                health_proto="HTTPS"
+                health_status="$https_code"
+                break
+            fi
 
-        local http_code=$(curl -s -o /dev/null -w "%{http_code}" "http://$domain" --max-time 5 2>/dev/null || echo "000")
-        if [ -n "$http_code" ] && [ "$http_code" -ge 200 ] && [ "$http_code" -lt 400 ]; then
-            health_check_passed=true
-            echo -e "${GREEN}Health check passed via HTTP (status: $http_code, attempt $attempt/$max_attempts)${NC}"
+            local http_code=$(curl -s -o /dev/null -w "%{http_code}" "http://$host" --max-time 5 2>/dev/null || echo "000")
+            if [ -n "$http_code" ] && [ "$http_code" -ge 200 ] && [ "$http_code" -lt 400 ]; then
+                health_check_passed=true
+                health_host="$host"
+                health_proto="HTTP"
+                health_status="$http_code"
+                break
+            fi
+        done
+
+        if [ "$health_check_passed" = true ]; then
+            echo -e "${GREEN}Health check passed via $health_proto (status: $health_status, host: $health_host, attempt $attempt/$max_attempts)${NC}"
             break
         fi
 
