@@ -43,7 +43,7 @@ sync_apply_summary_to_child_patch() {
             extra_domains: (if (.extra_domains | length) > 0 then .extra_domains else null end),
             dokku_settings: (if (.dokku_settings | length) > 0 then (.dokku_settings | settings_from_lines) else null end)
         }
-        | with_entries(select($diff_fields | index(.key)))
+        | with_entries(. as $entry | select($diff_fields | index($entry.key)))
     '
 }
 
