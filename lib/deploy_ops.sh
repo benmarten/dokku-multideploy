@@ -888,6 +888,11 @@ deploy_app() {
     fi
 
     # Health check
+    local health_check_enabled
+    health_check_enabled=$(echo "$deployment" | jq -r '.health_check // true')
+    if [ "$health_check_enabled" != "true" ]; then
+        echo -e "${YELLOW}Skipping health check (health_check=false)${NC}"
+    else
     echo -e "${BLUE}Running health check...${NC}"
     local max_attempts=12
     local attempt=0
@@ -896,6 +901,14 @@ deploy_app() {
     local health_proto=""
     local health_status=""
     local health_targets=()
+    local health_path
+    health_path=$(echo "$deployment" | jq -r '.health_path // "/"')
+    if [ -z "$health_path" ]; then
+        health_path="/"
+    fi
+    if [[ "$health_path" != /* ]]; then
+        health_path="/$health_path"
+    fi
 
     add_health_target() {
         local candidate="$1"
@@ -941,7 +954,7 @@ deploy_app() {
 
         for host in "${health_targets[@]}"; do
             # Try HTTPS first (preferred), then fall back to HTTP
-            local https_code=$(curl -s -o /dev/null -w "%{http_code}" "https://$host" --max-time 5 2>/dev/null || echo "000")
+            local https_code=$(curl -s -o /dev/null -w "%{http_code}" "https://$host$health_path" --max-time 5 2>/dev/null || echo "000")
             if [ -n "$https_code" ] && [ "$https_code" -ge 200 ] && [ "$https_code" -lt 400 ]; then
                 health_check_passed=true
                 health_host="$host"
@@ -950,7 +963,7 @@ deploy_app() {
                 break
             fi
 
-            local http_code=$(curl -s -o /dev/null -w "%{http_code}" "http://$host" --max-time 5 2>/dev/null || echo "000")
+            local http_code=$(curl -s -o /dev/null -w "%{http_code}" "http://$host$health_path" --max-time 5 2>/dev/null || echo "000")
             if [ -n "$http_code" ] && [ "$http_code" -ge 200 ] && [ "$http_code" -lt 400 ]; then
                 health_check_passed=true
                 health_host="$host"
@@ -975,6 +988,7 @@ deploy_app() {
         echo -e "${YELLOW}Health check did not pass within expected time${NC}"
         echo -e "${YELLOW}The deployment may still be building or starting up${NC}"
         echo -e "${YELLOW}Check logs with: ssh $SSH_ALIAS dokku logs $app_name -t${NC}"
+    fi
     fi
 
     # Enable Let's Encrypt SSL if configured and not already enabled
