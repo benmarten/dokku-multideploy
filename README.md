@@ -500,7 +500,6 @@ The `APP_NAME` environment variable is available in hooks.
    - Run pre-deploy hook
    - Git push to Dokku
    - Run post-deploy hook
-   - Health check
    - Enable Let's Encrypt if configured
 
 ## Requirements
@@ -509,7 +508,6 @@ The `APP_NAME` environment variable is available in hooks.
 - `jq` - JSON processor (`brew install jq` or `apt install jq`)
 - `git`
 - `ssh` access to your Dokku server
-- `curl` (for health checks)
 - `xz` (for backup mode - usually pre-installed)
 
 ## SSH Configuration
