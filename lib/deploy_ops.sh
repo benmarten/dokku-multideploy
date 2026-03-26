@@ -535,7 +535,7 @@ deploy_app() {
         current_builder=$(ssh $SSH_ALIAS "dokku builder:report $app_name 2>/dev/null | grep 'Builder selected:' | awk '{print \$NF}'" || echo "")
         if [ "$current_builder" != "$builder_type" ]; then
             echo -e "${BLUE}Setting builder: $builder_type${NC}"
-            if ! ssh $SSH_ALIAS "dokku builder:set $app_name $builder_type"; then
+            if ! ssh $SSH_ALIAS "dokku builder:set $app_name selected $builder_type"; then
                 echo -e "${RED}Failed to set builder '$builder_type' for $app_name${NC}"
                 return 1
             fi
