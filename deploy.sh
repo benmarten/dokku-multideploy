@@ -711,6 +711,12 @@ if [ "$LETSENCRYPT_REQUIRED" = true ]; then
 fi
 
 # Deploy or update config for each app
+if ! apply_dokku_networks_config "$CONFIG_FILE"; then
+    echo -e "${RED}Failed to apply dokku_networks configuration${NC}"
+    exit 1
+fi
+
+# Deploy or update config for each app
 for deployment in "${FILTERED_DEPLOYMENTS[@]}"; do
     if [ "$CONFIG_ONLY" = true ]; then
         apply_config_only "$deployment"

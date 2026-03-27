@@ -230,6 +230,7 @@ your-project/
 | `ssh_alias` | SSH alias for commands (e.g., `dokku` if configured in `~/.ssh/config`) |
 | `global_domain` | Base domain used to synthesize app domains during import when only `.dokku` exists |
 | `letsencrypt_email` | Global email used for Let's Encrypt certificate requests |
+| `dokku_networks` | Array of Dokku attachable network names to ensure before deploy/config runs |
 | `mysql_expose` | Map of MySQL service name to bind address for `dokku mysql:expose` (e.g., `{"mysql-prod":"127.0.0.1:3306"}`) |
 
 #### Parent Level (e.g., "api", "web")
@@ -306,6 +307,21 @@ ssh -N -L 13306:127.0.0.1:3306 -L 13307:127.0.0.1:3307 <ssh-alias>
 ```
 
 Then connect to `127.0.0.1` using local ports (`13306`, `13307`, ...). Local port numbers are arbitrary — choose values that do not conflict with services already bound on your workstation.
+
+### Dokku Network Creation
+
+Use root-level `dokku_networks` to ensure attachable Docker networks exist:
+
+```json
+{
+  "dokku_networks": ["vt-prod-internal", "vt-nonprod-internal"]
+}
+```
+
+Behavior:
+- Applied before deployment/config updates.
+- Idempotent: existing networks are skipped.
+- In `--dry-run`, commands are printed but not executed.
 
 ### Secrets (.env files)
 

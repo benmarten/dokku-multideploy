@@ -162,6 +162,55 @@ apply_mysql_expose_config() {
     return 0
 }
 
+apply_dokku_networks_config() {
+    local config_file="$1"
+    local dokku_networks_json
+
+    if [ ! -f "$config_file" ]; then
+        echo -e "${RED}apply_dokku_networks_config: config file not found: $config_file${NC}"
+        return 1
+    fi
+    if ! jq -e '.' "$config_file" > /dev/null 2>&1; then
+        echo -e "${RED}apply_dokku_networks_config: config file is not valid JSON: $config_file${NC}"
+        return 1
+    fi
+
+    dokku_networks_json=$(jq -c '.dokku_networks // []' "$config_file")
+    if ! echo "$dokku_networks_json" | jq -e 'type == "array" and length > 0' > /dev/null 2>&1; then
+        return 0
+    fi
+
+    echo -e "${BLUE}Ensuring Dokku networks...${NC}"
+
+    local network_name
+    while IFS= read -r network_name; do
+        [ -z "$network_name" ] && continue
+
+        if ! [[ "$network_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
+            echo -e "${RED}Invalid dokku network name: $network_name${NC}"
+            return 1
+        fi
+
+        if [ "$DRY_RUN" = true ]; then
+            echo -e "${YELLOW}[DRY RUN] Would ensure network exists: $network_name${NC}"
+            continue
+        fi
+
+        if ssh -n "$SSH_ALIAS" "dokku network:exists '$network_name'" > /dev/null 2>&1; then
+            echo -e "${GREEN}   Network already exists: $network_name${NC}"
+            continue
+        fi
+
+        echo -e "${BLUE}   Creating network: $network_name${NC}"
+        if ! ssh -n "$SSH_ALIAS" "dokku network:create '$network_name'" > /dev/null 2>&1; then
+            echo -e "${RED}   Failed to create network: $network_name${NC}"
+            return 1
+        fi
+    done < <(echo "$dokku_networks_json" | jq -r '.[]')
+
+    return 0
+}
+
 apply_config_only() {
     local deployment=$1
     local domain=$(echo "$deployment" | jq -r '.domain')
