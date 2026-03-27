@@ -61,6 +61,7 @@ NO_PROD=false
 YES_TO_ALL=false
 FORCE_DEPLOY=false
 CONFIG_ONLY=false
+FORCE_MYSQL_EXPOSE=false
 IMPORT_MODE=false
 IMPORT_DIR=""
 IMPORT_SECRETS=true
@@ -90,6 +91,7 @@ show_help() {
     echo "  --force             Force deployment even if commits match (for config changes)"
     echo "  --config-only       Only update env vars and restart (no code deploy)"
     echo "  --no-prod           Skip production deployments"
+    echo "  --force-mysql-expose Apply root mysql_expose even on filtered deploys"
     echo "  --yes               Skip confirmation prompts (use with caution)"
     echo "  --tag <tag>         Deploy only apps with this tag (can be used multiple times)"
     echo "  --import <dir>      Import apps from Dokku server to <dir> (all apps by default)"
@@ -114,6 +116,7 @@ show_help() {
     echo "  $0 --force                       # Force deploy (for config/env changes)"
     echo "  $0 --config-only api.example.com # Update config only, restart"
     echo "  $0 --no-prod                     # Deploy all except production"
+    echo "  $0 --tag api --force-mysql-expose # Deploy filtered app(s) and still apply mysql_expose"
     echo "  $0 --tag api                     # Deploy only apps tagged 'api'"
     echo "  $0 --tag staging --tag api       # Deploy apps tagged 'staging' OR 'api'"
     echo "  $0 api.example.com               # Deploy specific app"
@@ -158,6 +161,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-prod)
             NO_PROD=true
+            shift
+            ;;
+        --force-mysql-expose)
+            FORCE_MYSQL_EXPOSE=true
             shift
             ;;
         --yes|-y)
@@ -712,9 +719,13 @@ for deployment in "${FILTERED_DEPLOYMENTS[@]}"; do
     fi
 done
 
-if ! apply_mysql_expose_config "$CONFIG_FILE"; then
-    echo -e "${RED}Failed to apply mysql_expose configuration${NC}"
-    exit 1
+if [ "$FORCE_MYSQL_EXPOSE" = true ] || ([ ${#SELECTED_DEPLOYMENTS[@]} -eq 0 ] && [ ${#FILTER_TAGS[@]} -eq 0 ] && [ "$NO_PROD" = false ]); then
+    if ! apply_mysql_expose_config "$CONFIG_FILE"; then
+        echo -e "${RED}Failed to apply mysql_expose configuration${NC}"
+        exit 1
+    fi
+else
+    echo -e "${YELLOW}Skipping mysql_expose configuration for filtered deployment run (use --force-mysql-expose to override)${NC}"
 fi
 
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
