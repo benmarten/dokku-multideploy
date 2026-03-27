@@ -2,6 +2,10 @@
   "ssh_host": "dokku@your-server.com",
   "ssh_alias": "dokku",
   "global_domain": "example.com",
+  "dokku_networks": [
+    "myapp-prod-internal",
+    "myapp-nonprod-internal"
+  ],
   "mysql_expose": {
     "mysql-prod": "127.0.0.1:3306",
     "mysql-staging": "127.0.0.1:3307",
