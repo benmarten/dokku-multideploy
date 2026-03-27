@@ -291,7 +291,8 @@ Use root-level `mysql_expose` to declare local-only binds for Dokku MySQL servic
 ```
 
 Behavior:
-- Applied after deployment/config updates, in both full deploy and `--config-only` mode.
+- Applied after deployment/config updates in full (unfiltered) deploy/config runs.
+- Skipped for filtered runs (`--tag`, explicit app names, or `--no-prod`) unless `--force-mysql-expose` is provided.
 - Skips the service if the desired bind is already active.
 - If a different bind exists, unexposes all current bindings and re-exposes with the configured address.
 - Accepts binds in the form `127.0.0.1:<port>` or `0.0.0.0:<port>` where port is 1–65535.
@@ -339,6 +340,9 @@ DATABASE_PASSWORD=production-secret
 # Skip production
 ./deploy.sh --no-prod
 
+# Apply mysql_expose even on filtered deploys
+./deploy.sh --tag staging --force-mysql-expose
+
 # Dry run (see what would happen)
 ./deploy.sh --dry-run
 
@@ -351,6 +355,11 @@ DATABASE_PASSWORD=production-secret
 # Skip confirmation prompts
 ./deploy.sh --yes
 ```
+
+Key options:
+- `--tag <tag>`: deploy only apps with matching tag(s)
+- `--no-prod`: exclude apps tagged `production`
+- `--force-mysql-expose`: apply root `mysql_expose` even when using filtered deploy selection
 
 ## Sync Check
 
