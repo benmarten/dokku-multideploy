@@ -1,3 +1,21 @@
+is_sensitive_env_key() {
+    local key_upper
+    key_upper=$(echo "$1" | tr '[:lower:]' '[:upper:]')
+
+    # Keep likely credentials/secrets in .env files instead of config.json.
+    if [[ "$key_upper" =~ (^|_)(SECRET|PASSWORD|PASS|PASSWD|TOKEN|PRIVATE|CERT|COOKIE|SESSION|JWT|SIGNING|ENCRYPTION|DSN|CONNECTION_STRING)($|_) ]]; then
+        return 0
+    fi
+    if [[ "$key_upper" =~ (^|_)(API_KEY|ACCESS_KEY|SECRET_KEY|CLIENT_SECRET|PRIVATE_KEY|DB_PASSWORD|DATABASE_PASSWORD)($|_) ]]; then
+        return 0
+    fi
+    if [[ "$key_upper" =~ (^|_)KEY($|_) ]]; then
+        return 0
+    fi
+
+    return 1
+}
+
 import_from_server() {
     local import_dir="$1"
     local ssh_alias="$2"
@@ -251,6 +269,7 @@ import_from_server() {
         fi
 
         # Export env vars
+        local imported_public_env_json="{}"
         if [ "$import_secrets" = true ]; then
             echo -e "  ${BLUE}Exporting env vars...${NC}"
             local env_vars
@@ -260,10 +279,65 @@ import_from_server() {
                 sed 's/^export //' | \
                 grep -v '^DOKKU_\|^GIT_REV=\|^PORT=\|^DATABASE_URL=' || true)
             if [ -n "$env_vars" ]; then
-                echo "$env_vars" > "$env_path/$primary_domain"
+                local secret_env_lines=""
+                local public_env_lines=""
+                local env_line
+                while IFS= read -r env_line; do
+                    [ -z "$env_line" ] && continue
+                    if [[ "$env_line" != *=* ]]; then
+                        continue
+                    fi
+
+                    local env_key="${env_line%%=*}"
+                    local env_value="${env_line#*=}"
+                    [ -z "$env_key" ] && continue
+
+                    # Values that appear shell-quoted stay in .env to preserve exact raw representation.
+                    if [[ "$env_value" =~ ^\'.*\'$ ]] || [[ "$env_value" =~ ^\".*\"$ ]]; then
+                        secret_env_lines+="$env_line"$'\n'
+                        continue
+                    fi
+
+                    if is_sensitive_env_key "$env_key"; then
+                        secret_env_lines+="$env_line"$'\n'
+                    else
+                        public_env_lines+="$env_line"$'\n'
+                    fi
+                done <<< "$env_vars"
+
+                if [ -n "$secret_env_lines" ]; then
+                    printf "%s" "$secret_env_lines" > "$env_path/$primary_domain"
+                fi
+
+                if [ -n "$public_env_lines" ]; then
+                    imported_public_env_json=$(printf "%s" "$public_env_lines" | jq -Rn '
+                        [inputs | select(length > 0) | capture("^(?<k>[^=]+)=(?<v>.*)$")]
+                        | reduce .[] as $item ({}; .[$item.k] = $item.v)
+                    ')
+                fi
+
                 local env_rel_path="${env_path#$SCRIPT_DIR/}"
                 local var_count=$(echo "$env_vars" | wc -l | tr -d ' ')
-                echo -e "  ${GREEN}Saved $var_count vars to $env_rel_path/$primary_domain${NC}"
+                local secret_count=0
+                local public_count=0
+                if [ -n "$secret_env_lines" ]; then
+                    secret_count=$(printf "%s" "$secret_env_lines" | sed '/^$/d' | wc -l | tr -d ' ')
+                fi
+                if [ -n "$public_env_lines" ]; then
+                    public_count=$(printf "%s" "$public_env_lines" | sed '/^$/d' | wc -l | tr -d ' ')
+                fi
+
+                if [ "$secret_count" -gt 0 ]; then
+                    echo -e "  ${GREEN}Saved $secret_count secret vars to $env_rel_path/$primary_domain${NC}"
+                else
+                    echo -e "  ${YELLOW}No secret vars saved to .env/$primary_domain${NC}"
+                fi
+                if [ "$public_count" -gt 0 ]; then
+                    echo -e "  ${GREEN}Saved $public_count non-secret vars to config.json env_vars${NC}"
+                else
+                    echo -e "  ${YELLOW}No non-secret vars saved to config.json env_vars${NC}"
+                fi
+                echo -e "  ${BLUE}Total imported env vars:${NC} $var_count"
             else
                 echo -e "  ${YELLOW}No env vars to export${NC}"
             fi
@@ -292,6 +366,7 @@ import_from_server() {
             --argjson docker_options "$docker_options_json" \
             --argjson extra_domains "$extra_domains_json" \
             --argjson dokku_settings "$dokku_settings_json" \
+            --argjson imported_public_env "$imported_public_env_json" \
             '{
                 source_dir: $source_dir,
                 branch: $branch,
@@ -304,7 +379,7 @@ import_from_server() {
                 extra_domains: (if $extra_domains == [] then null else $extra_domains end),
                 dokku_settings: (if $dokku_settings == {} then null else $dokku_settings end),
                 deployments: {
-                    ($domain): {}
+                    ($domain): (if $imported_public_env == {} then {} else {env_vars: $imported_public_env} end)
                 }
             } | with_entries(select(.value != null and .value != false))')
 

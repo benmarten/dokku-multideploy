@@ -30,8 +30,8 @@ apply_dokku_settings() {
             fi
 
             local escaped_setting_value="${setting_value//\'/\'\\\'\'}"
-            echo -e "${BLUE}   dokku $plugin:set $app_name $setting_key $setting_value${NC}"
-            ssh $SSH_ALIAS "dokku $plugin:set $app_name $setting_key '$escaped_setting_value'" || true
+            echo -e "${BLUE}   dokku $plugin:set $app_name $setting_key [REDACTED]${NC}"
+            ssh $SSH_ALIAS "dokku $plugin:set $app_name $setting_key '$escaped_setting_value'" >/dev/null 2>&1 || true
         done < <(echo "$dokku_settings_json" | jq -r --arg plugin "$plugin" '
             .[$plugin] // {}
             | to_entries[]
@@ -205,7 +205,8 @@ apply_config_only() {
     fi
 
     if [ -n "$secrets" ]; then
-        ssh $SSH_ALIAS "dokku config:set --no-restart $app_name $secrets" || true
+        echo -e "${BLUE}Applying secrets from .env files...${NC}"
+        ssh $SSH_ALIAS "dokku config:set --no-restart $app_name $secrets" >/dev/null 2>&1 || true
     fi
 
     # Set environment variables from config.json (properly escaped)
@@ -223,7 +224,7 @@ apply_config_only() {
                 local escaped_value="${value//\'/\'\\\'\'}"
                 escaped_vars="$escaped_vars '${key}=${escaped_value}'"
             done < <(echo "$deployment" | jq -c '.env_vars | to_entries[]')
-            ssh $SSH_ALIAS "dokku config:set --no-restart $app_name $escaped_vars" || true
+            ssh $SSH_ALIAS "dokku config:set --no-restart $app_name $escaped_vars" >/dev/null 2>&1 || true
         fi
     fi
 
@@ -754,7 +755,8 @@ deploy_app() {
 
     # Apply all secrets
     if [ -n "$secrets" ]; then
-        ssh $SSH_ALIAS "dokku config:set --no-restart $app_name $secrets" || true
+        echo -e "${BLUE}Applying secrets from .env files...${NC}"
+        ssh $SSH_ALIAS "dokku config:set --no-restart $app_name $secrets" >/dev/null 2>&1 || true
     else
         echo -e "${YELLOW}No secrets found${NC}"
         echo -e "${YELLOW}Create .env/_$source_dir and/or .env/$domain${NC}"
@@ -775,7 +777,7 @@ deploy_app() {
                 local escaped_value="${value//\'/\'\\\'\'}"
                 escaped_vars="$escaped_vars '${key}=${escaped_value}'"
             done < <(echo "$deployment" | jq -c '.env_vars | to_entries[]')
-            ssh $SSH_ALIAS "dokku config:set --no-restart $app_name $escaped_vars" || true
+            ssh $SSH_ALIAS "dokku config:set --no-restart $app_name $escaped_vars" >/dev/null 2>&1 || true
         fi
     fi
 
@@ -807,7 +809,7 @@ deploy_app() {
             mysql_env_string="$mysql_env_string 'DATABASE_PASSWORD=${mysql_pass_escaped}'"
 
             echo -e "${BLUE}Applying MySQL connection vars from service DSN...${NC}"
-            ssh $SSH_ALIAS "dokku config:set --no-restart $app_name $mysql_env_string" || {
+            ssh $SSH_ALIAS "dokku config:set --no-restart $app_name $mysql_env_string" >/dev/null 2>&1 || {
                 echo -e "${RED}Failed to apply MySQL connection vars from service DSN${NC}"
                 return 1
             }

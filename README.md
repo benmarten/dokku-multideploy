@@ -117,7 +117,7 @@ Already have apps running on a Dokku server? Import everything:
 This will:
 1. Clone all app git repos to `./apps/<domain>/`
 2. Generate `config.json` with settings (domains, ports, storage, postgres, letsencrypt)
-3. Export all env vars to `.env/` files (not config.json, since we can't distinguish secrets)
+3. Split env vars on import: sensitive keys go to `.env/`, non-sensitive keys go to deployment `env_vars` in `config.json`
 
 Then symlink deploy.sh and you're ready:
 ```bash
