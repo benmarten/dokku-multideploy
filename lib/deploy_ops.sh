@@ -427,18 +427,20 @@ deploy_app() {
         fi
     fi
 
-    # Determine which branch to use for deployment
+    # Determine which branch/ref to use for deployment
     echo -e "${BLUE}Syncing with origin...${NC}"
 
     # Get current local branch
-    local current_branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo "")
+    local current_branch
+    current_branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo "")
 
     git fetch origin 2>/dev/null || {
         echo -e "${YELLOW}Warning: Could not fetch from origin${NC}"
     }
 
     # Try to get configured branch, or auto-detect
-    local repo_branch=$(echo "$deployment" | jq -r '.branch // empty')
+    local repo_branch
+    repo_branch=$(echo "$deployment" | jq -r '.branch // empty')
     if [ -z "$repo_branch" ] || [ "$repo_branch" = "null" ]; then
         # Use current branch if it exists and looks reasonable
         if [ -n "$current_branch" ] && [[ "$current_branch" =~ ^(main|master|dev|develop)$ ]]; then
@@ -464,46 +466,34 @@ deploy_app() {
         fi
     fi
 
-    # Checkout branch if not already on it
-    if [ "$current_branch" != "$repo_branch" ]; then
-        if ! git checkout "$repo_branch" 2>/dev/null; then
-            echo -e "${YELLOW}Warning: Cannot checkout configured branch '$repo_branch'${NC}"
-            local detected_branch=""
-            detected_branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')
-            if [ -z "$detected_branch" ]; then
-                if git rev-parse --verify origin/main >/dev/null 2>&1; then
-                    detected_branch="main"
-                elif git rev-parse --verify origin/master >/dev/null 2>&1; then
-                    detected_branch="master"
-                fi
-            fi
-
-            if [ -n "$detected_branch" ] && git checkout "$detected_branch" 2>/dev/null; then
-                echo -e "${YELLOW}Using auto-detected branch '$detected_branch' instead${NC}"
-                repo_branch="$detected_branch"
-            else
-                echo -e "${RED}Error: Cannot checkout branch '$repo_branch'${NC}"
-                cd "$SCRIPT_DIR"
-                return 1
-            fi
-        fi
-    fi
-
-    # Try to pull from origin if the branch exists there
-    if git rev-parse --verify origin/$repo_branch >/dev/null 2>&1; then
-        # Ensure branch tracks origin
-        git branch --set-upstream-to=origin/$repo_branch $repo_branch 2>/dev/null || true
-
-        # Pull latest changes
-        if ! git pull origin "$repo_branch" 2>/dev/null; then
-            echo -e "${YELLOW}Warning: Could not pull latest changes${NC}"
-            echo -e "${YELLOW}This may fail if you have uncommitted changes${NC}"
-            echo -e "${YELLOW}Continuing with local version...${NC}"
-        else
-            echo -e "${GREEN}Synced with origin/$repo_branch${NC}"
-        fi
+    # Resolve a source ref without forcing local checkout (safe for dirty working trees)
+    local source_ref=""
+    if git rev-parse --verify "origin/$repo_branch" >/dev/null 2>&1; then
+        source_ref="origin/$repo_branch"
+        echo -e "${GREEN}Using remote ref: $source_ref${NC}"
+    elif git rev-parse --verify "$repo_branch" >/dev/null 2>&1; then
+        source_ref="$repo_branch"
+        echo -e "${YELLOW}Branch '$repo_branch' not found on origin, using local branch${NC}"
     else
-        echo -e "${YELLOW}Branch '$repo_branch' not found on origin, using local version${NC}"
+        local detected_branch=""
+        detected_branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')
+        if [ -z "$detected_branch" ]; then
+            if git rev-parse --verify origin/main >/dev/null 2>&1; then
+                detected_branch="main"
+            elif git rev-parse --verify origin/master >/dev/null 2>&1; then
+                detected_branch="master"
+            fi
+        fi
+
+        if [ -n "$detected_branch" ] && git rev-parse --verify "origin/$detected_branch" >/dev/null 2>&1; then
+            echo -e "${YELLOW}Warning: Cannot resolve configured branch '$repo_branch', using '$detected_branch'${NC}"
+            repo_branch="$detected_branch"
+            source_ref="origin/$detected_branch"
+        else
+            echo -e "${RED}Error: Cannot resolve branch '$repo_branch' in source repo${NC}"
+            cd "$SCRIPT_DIR"
+            return 1
+        fi
     fi
     echo ""
 
@@ -533,13 +523,13 @@ deploy_app() {
             cd "$SCRIPT_DIR"
             return 1
         fi
-        if ! git -C "$repo_root" rev-parse --verify "$repo_branch:$subtree_prefix_effective" >/dev/null 2>&1; then
-            echo -e "${RED}Error: subtree_prefix '$subtree_prefix_effective' not found in branch '$repo_branch'${NC}"
+        if ! git -C "$repo_root" rev-parse --verify "$source_ref:$subtree_prefix_effective" >/dev/null 2>&1; then
+            echo -e "${RED}Error: subtree_prefix '$subtree_prefix_effective' not found in ref '$source_ref'${NC}"
             cd "$SCRIPT_DIR"
             return 1
         fi
         echo -e "${BLUE}Building subtree commit for: $subtree_prefix_effective${NC}"
-        local_commit=$(git -C "$repo_root" subtree split --prefix="$subtree_prefix_effective" "$repo_branch" 2>/dev/null) || {
+        local_commit=$(git -C "$repo_root" subtree split --prefix="$subtree_prefix_effective" "$source_ref" 2>/dev/null) || {
             echo -e "${RED}Error: failed to create subtree commit for '$subtree_prefix_effective'${NC}"
             cd "$SCRIPT_DIR"
             return 1
@@ -548,7 +538,7 @@ deploy_app() {
         if [ -n "$subtree_prefix" ]; then
             echo -e "${BLUE}Subtree prefix resolves to repository root; using branch commit directly${NC}"
         fi
-        local_commit=$(git -C "$repo_root" rev-parse "$repo_branch" 2>/dev/null)
+        local_commit=$(git -C "$repo_root" rev-parse "$source_ref" 2>/dev/null)
     fi
     local remote_commit=$(git rev-parse "$remote_name/$dokku_branch" 2>/dev/null || echo "")
 
@@ -904,7 +894,7 @@ deploy_app() {
     if [ -n "$subtree_prefix_effective" ]; then
         echo -e "${BLUE}Deploying subtree: $subtree_prefix_effective (${local_commit:0:8})${NC}"
     else
-        echo -e "${BLUE}Deploying branch: $repo_branch${NC}"
+        echo -e "${BLUE}Deploying branch: $repo_branch (${local_commit:0:8})${NC}"
     fi
 
     # Deploy
@@ -912,10 +902,7 @@ deploy_app() {
     echo ""
 
     # Try to push without force first
-    local push_ref="$repo_branch"
-    if [ -n "$subtree_prefix_effective" ]; then
-        push_ref="$local_commit"
-    fi
+    local push_ref="$local_commit"
     if git push "$remote_name" "$push_ref:refs/heads/$dokku_branch"; then
         echo ""
         echo -e "${GREEN}Pushed successfully${NC}"
