@@ -255,17 +255,32 @@ import_from_server() {
         local builder=""
         builder=$(ssh "$ssh_alias" "dokku builder:report $app" 2>/dev/null | sed -n 's/.*Builder selected:[[:space:]]*//p' | head -n1 | xargs)
 
-        # Import app-level Dokku plugin settings (currently nginx client-max-body-size).
+        # Import app-level Dokku plugin settings (nginx + network attach settings).
         local dokku_settings_json="{}"
         local nginx_client_max_body_size
         nginx_client_max_body_size=$(ssh "$ssh_alias" "dokku nginx:report $app" 2>/dev/null | sed -n 's/^ *Nginx client max body size:[[:space:]]*//p' | head -n1 | xargs)
         # Skip Dokku's default 1m to avoid false drift when config does not set this explicitly.
         if [ -n "$nginx_client_max_body_size" ] && [ "$nginx_client_max_body_size" != "1m" ]; then
-            dokku_settings_json=$(jq -n --arg size "$nginx_client_max_body_size" '{
-                nginx: {
-                    "client-max-body-size": $size
+            dokku_settings_json=$(echo "$dokku_settings_json" | jq -c --arg size "$nginx_client_max_body_size" '
+                . + {
+                    nginx: {
+                        "client-max-body-size": $size
+                    }
                 }
-            }')
+            ')
+        fi
+
+        local network_attach_post_create
+        network_attach_post_create=$(ssh "$ssh_alias" "dokku network:report $app" 2>/dev/null | sed -n 's/^ *Network attach post create:[[:space:]]*//Ip' | head -n1 | xargs)
+        # Only persist explicit network attachment values.
+        if [ -n "$network_attach_post_create" ] && [ "$network_attach_post_create" != "false" ] && [ "$network_attach_post_create" != "none" ] && [ "$network_attach_post_create" != "(none)" ]; then
+            dokku_settings_json=$(echo "$dokku_settings_json" | jq -c --arg attach "$network_attach_post_create" '
+                . + {
+                    network: {
+                        "attach-post-create": $attach
+                    }
+                }
+            ')
         fi
 
         # Export env vars
