@@ -87,6 +87,45 @@ apply_sync_patch_to_config() {
     return 0
 }
 
+get_effective_local_summary_for_domain() {
+    local domain="$1"
+    jq -c --arg domain "$domain" '
+        first([
+            to_entries[]
+            | select(.value | type == "object" and has("deployments"))
+            | .value as $parent
+            | ($parent.deployments | to_entries[])
+            | select(.key == $domain)
+            | .value as $child
+            | {
+                branch: ($child.branch // $parent.branch // null),
+                builder: ($child.builder // $parent.builder // null),
+                postgres: (($child.postgres // $parent.postgres // false) == true or ($child.postgres // $parent.postgres // false) == "true"),
+                letsencrypt: (($child.letsencrypt // $parent.letsencrypt // false) == true or ($child.letsencrypt // $parent.letsencrypt // false) == "true"),
+                ports: (($child.ports // $parent.ports // []) | map(tostring) | sort),
+                storage_mounts: ((($child.storage_mounts // []) + ($parent.storage_mounts // [])) | map(tostring) | sort),
+                docker_options: ((($child.docker_options // []) + ($parent.docker_options // [])) | map(tostring) | sort),
+                extra_domains: ((($child.extra_domains // []) + ($parent.extra_domains // [])) | map(tostring) | sort),
+                dokku_settings: (
+                    ((($parent.dokku_settings // {}) * ($child.dokku_settings // {})) // {})
+                    | to_entries
+                    | map(
+                        select(.value | type == "object")
+                        | .key as $plugin
+                        | (
+                            .value
+                            | to_entries
+                            | map("\($plugin):\(.key)=\(.value|tostring)")
+                        )
+                    )
+                    | add // []
+                    | sort
+                )
+            }
+        ][])
+    ' "$CONFIG_FILE"
+}
+
 print_live_status_summary() {
     echo ""
     echo -e "${BLUE}Live App Status (from dokku ps:report --all):${NC}"
@@ -384,6 +423,9 @@ run_sync_check() {
             if [ "$SYNC_APPLY" = true ]; then
                 local child_patch
                 local diff_fields_json
+                local patch_rc
+                local post_apply_summary
+                local remaining_diff_fields=()
                 diff_fields_json=$(printf '%s\n' "${diff_fields[@]}" | jq -R . | jq -s .)
                 child_patch=$(sync_apply_summary_to_child_patch "$remote_summary" "$diff_fields_json")
                 if [ "$DRY_RUN" = true ]; then
@@ -393,19 +435,83 @@ run_sync_check() {
                     apply_preview_count=$((apply_preview_count + 1))
                     mismatch_count=$((mismatch_count + 1))
                     sync_ok=false
-                elif apply_sync_patch_to_config "$domain" "$child_patch"; then
-                    echo -e "   ${GREEN}apply${NC}"
-                    echo -e "     result: patched local config.json"
-                    applied_count=$((applied_count + 1))
                 else
-                    local patch_rc=$?
-                    if [ "$patch_rc" -eq 2 ]; then
+                    if apply_sync_patch_to_config "$domain" "$child_patch"; then
+                        patch_rc=0
+                    else
+                        patch_rc=$?
+                    fi
+
+                    if [ "$patch_rc" -ne 0 ] && [ "$patch_rc" -ne 2 ]; then
+                        echo -e "   ${RED}apply${NC}"
+                        echo -e "     result: failed to patch local config.json"
+                        apply_failed_count=$((apply_failed_count + 1))
+                        mismatch_count=$((mismatch_count + 1))
+                        sync_ok=false
+                        continue
+                    fi
+
+                    post_apply_summary=$(get_effective_local_summary_for_domain "$domain")
+                    if [ -z "$post_apply_summary" ] || [ "$post_apply_summary" = "null" ]; then
+                        echo -e "   ${RED}apply${NC}"
+                        echo -e "     result: patch applied but could not re-evaluate effective local config"
+                        apply_failed_count=$((apply_failed_count + 1))
+                        mismatch_count=$((mismatch_count + 1))
+                        sync_ok=false
+                        continue
+                    fi
+
+                    for field in "${diff_fields[@]}"; do
+                        local post_local_val
+                        local remote_val
+                        post_local_val=$(echo "$post_apply_summary" | jq -c ".$field")
+                        remote_val=$(echo "$remote_summary" | jq -c ".$field")
+
+                        # Treat default single http/https mapping as equivalent to unset ports.
+                        if [ "$field" = "ports" ]; then
+                            post_local_val=$(echo "$post_local_val" | jq -c '
+                                map(tostring)
+                                | map(select(test("^http:80:[0-9]+$|^https:443:[0-9]+$") | not))
+                                | sort
+                            ')
+                            remote_val=$(echo "$remote_val" | jq -c '
+                                map(tostring)
+                                | map(select(test("^http:80:[0-9]+$|^https:443:[0-9]+$") | not))
+                                | sort
+                            ')
+                        fi
+
+                        # Treat unspecified builder as equivalent to Dokku default builder.
+                        if [ "$field" = "builder" ]; then
+                            if [ "$post_local_val" = "null" ] && { [ "$remote_val" = "null" ] || [ "$remote_val" = "\"herokuish\"" ] || [ "$remote_val" = "\"selected:\"" ] || [ "$remote_val" = "\"selected\"" ]; }; then
+                                continue
+                            fi
+                        fi
+
+                        if [ "$field" = "extra_domains" ]; then
+                            if extra_domains_match "$post_local_val" "$remote_val"; then
+                                continue
+                            fi
+                        fi
+
+                        if [ "$post_local_val" != "$remote_val" ]; then
+                            remaining_diff_fields+=("$field")
+                        fi
+                    done
+
+                    if [ ${#remaining_diff_fields[@]} -eq 0 ]; then
                         echo -e "   ${GREEN}apply${NC}"
-                        echo -e "     result: no local file change required"
+                        if [ "$patch_rc" -eq 0 ]; then
+                            echo -e "     result: patched local config.json"
+                        else
+                            echo -e "     result: no local file change required"
+                        fi
                         applied_count=$((applied_count + 1))
                     else
                         echo -e "   ${RED}apply${NC}"
-                        echo -e "     result: failed to patch local config.json"
+                        echo -e "     result: unresolved drift remains after child-level patch"
+                        echo -e "     fields: $(printf '%s\n' "${remaining_diff_fields[@]}" | paste -sd ', ' -)"
+                        echo -e "     hint  : move these settings to deployment-level or patch parent block manually"
                         apply_failed_count=$((apply_failed_count + 1))
                         mismatch_count=$((mismatch_count + 1))
                         sync_ok=false
