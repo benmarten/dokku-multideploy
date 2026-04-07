@@ -300,6 +300,16 @@ apply_config_only() {
         fi
     fi
 
+    # Configure port mappings if specified
+    if echo "$deployment" | jq -e '.ports' > /dev/null 2>&1; then
+        local ports=$(echo "$deployment" | jq -r '.ports | join(" ")' 2>/dev/null)
+        if [ -n "$ports" ]; then
+            echo -e "${BLUE}Configuring port mappings...${NC}"
+            echo -e "${BLUE}   Ports: $ports${NC}"
+            ssh $SSH_ALIAS "dokku ports:set $app_name $ports" || true
+        fi
+    fi
+
     apply_dokku_settings "$app_name" "$dokku_settings"
 
     # Apply Let's Encrypt SSL in config-only mode when requested
