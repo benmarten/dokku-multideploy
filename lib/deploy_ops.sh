@@ -357,6 +357,43 @@ apply_config_only() {
         fi
     fi
 
+    # Set version metadata before restart
+    local repo_branch=$(echo "$deployment" | jq -r '.branch // empty')
+    if [ -n "$repo_branch" ]; then
+        echo -e "${BLUE}Setting version metadata...${NC}"
+        # Change to source directory to access git
+        local source_path
+        if [[ "$source_dir" == /* ]]; then
+            source_path="$source_dir"
+        else
+            source_path="$SCRIPT_DIR/$source_dir"
+        fi
+
+        cd "$source_path" 2>/dev/null || {
+            echo -e "${YELLOW}Warning: Cannot access source directory, skipping version metadata${NC}"
+            cd "$SCRIPT_DIR"
+        }
+
+        if [ -d ".git" ]; then
+            local local_commit=$(git rev-parse "$repo_branch" 2>/dev/null || git rev-parse HEAD 2>/dev/null || echo "")
+            if [ -n "$local_commit" ]; then
+                local app_version=$(git tag --points-at "$local_commit" 2>/dev/null | grep -E '^v[0-9]+\.' | head -1 || echo "")
+                local git_ref="${repo_branch}"
+
+                local version_vars="GIT_REF=${git_ref}"
+                if [ -n "$app_version" ]; then
+                    version_vars="APP_VERSION=${app_version} ${version_vars}"
+                fi
+
+                ssh -n $SSH_ALIAS "dokku config:set --no-restart $app_name $version_vars" || {
+                    echo -e "${YELLOW}Warning: Could not set version metadata${NC}"
+                }
+            fi
+        fi
+        cd "$SCRIPT_DIR"
+        echo ""
+    fi
+
     # Restart the app to apply changes
     echo -e "${BLUE}Restarting app...${NC}"
     ssh $SSH_ALIAS "dokku ps:restart $app_name"
@@ -916,6 +953,24 @@ deploy_app() {
     else
         echo -e "${BLUE}Deploying branch: $repo_branch${NC}"
     fi
+
+    # Set version metadata before deploy
+    echo -e "${BLUE}Setting version metadata...${NC}"
+    local app_version=""
+    # Check if local_commit is tagged with a version
+    app_version=$(git tag --points-at "$local_commit" 2>/dev/null | grep -E '^v[0-9]+\.' | head -1 || echo "")
+    local git_ref="${repo_branch}"
+
+    # Build config:set command
+    local version_vars="GIT_REF=${git_ref}"
+    if [ -n "$app_version" ]; then
+        version_vars="APP_VERSION=${app_version} ${version_vars}"
+    fi
+
+    ssh -n $SSH_ALIAS "dokku config:set --no-restart $app_name $version_vars" || {
+        echo -e "${YELLOW}Warning: Could not set version metadata${NC}"
+    }
+    echo ""
 
     # Deploy
     echo -e "${GREEN}Pushing to Dokku...${NC}"
