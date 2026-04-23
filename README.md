@@ -329,6 +329,10 @@ Secrets are loaded hierarchically:
 1. `.env/_<source_dir>` - Shared secrets for all apps with that source_dir
 2. `.env/<domain>` - Domain-specific secrets (overrides shared)
 
+Build-only secrets can be kept separately and are merged into Docker build args without being sent through `dokku config:set`:
+1. `.env/_<source_dir>.build` - Shared build secrets for all apps with that source_dir
+2. `.env/<domain>.build` - Domain-specific build secrets (overrides shared build secrets and `config.json` `build_args`)
+
 ```bash
 # .env/_api (shared by all api deployments)
 DATABASE_PASSWORD=shared-secret
@@ -336,6 +340,12 @@ API_KEY=common-key
 
 # .env/api.example.com (production-specific)
 DATABASE_PASSWORD=production-secret
+
+# .env/_frontend.build (shared build-only secret)
+SENTRY_AUTH_TOKEN=shared-build-token
+
+# .env/www.example.com.build (production-specific build-only secret)
+SENTRY_AUTH_TOKEN=production-build-token
 ```
 
 ## Usage

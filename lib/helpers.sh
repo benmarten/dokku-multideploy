@@ -31,6 +31,33 @@ parse_env_file() {
     echo "$result"
 }
 
+parse_env_file_to_json() {
+    local file=$1
+    local result="{}"
+
+    if [ ! -f "$file" ]; then
+        echo "{}"
+        return
+    fi
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+
+        if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+            local key="${BASH_REMATCH[1]}"
+            local value="${BASH_REMATCH[2]}"
+
+            if [[ "$value" =~ ^\"(.*)\"$ ]] || [[ "$value" =~ ^\'(.*)\'$ ]]; then
+                value="${BASH_REMATCH[1]}"
+            fi
+
+            result=$(printf '%s' "$result" | jq -c --arg key "$key" --arg value "$value" '. + {($key): $value}')
+        fi
+    done < "$file"
+
+    echo "$result"
+}
+
 get_env_value() {
     local file=$1
     local key=$2

@@ -913,13 +913,28 @@ deploy_app() {
     fi
 
     # Set build args (build-time) - handled via docker-options
-    if echo "$deployment" | jq -e '.build_args' > /dev/null 2>&1; then
+    local shared_build_file="$SCRIPT_DIR/.env/_$source_dir.build"
+    local domain_build_file="$SCRIPT_DIR/.env/$domain.build"
+    local build_args_json
+    build_args_json=$(echo "$deployment" | jq -c '.build_args // {}')
+
+    if [ -f "$shared_build_file" ]; then
+        echo -e "${BLUE}Loading shared build secrets from .env/_$source_dir.build${NC}"
+        build_args_json=$(printf '%s' "$build_args_json" | jq -c --argjson extra "$(parse_env_file_to_json "$shared_build_file")" '. + $extra')
+    fi
+
+    if [ -f "$domain_build_file" ]; then
+        echo -e "${BLUE}Loading build secrets from .env/$domain.build${NC}"
+        build_args_json=$(printf '%s' "$build_args_json" | jq -c --argjson extra "$(parse_env_file_to_json "$domain_build_file")" '. + $extra')
+    fi
+
+    if echo "$build_args_json" | jq -e 'type == "object" and length > 0' > /dev/null 2>&1; then
         echo -e "${BLUE}Setting build arguments...${NC}"
 
         # Clear existing build args first
         ssh $SSH_ALIAS "dokku docker-options:clear $app_name build" || true
 
-        # Add build args from config.json only (not .env secrets - those are runtime only)
+        # Add build args from config.json and optional .build secret files.
         while IFS= read -r line; do
             [[ -z "$line" ]] && continue
             local key=$(echo "$line" | jq -r '.key')
@@ -927,7 +942,7 @@ deploy_app() {
             # Escape double quotes in value and wrap in double quotes
             local escaped_value="${value//\"/\\\"}"
             ssh -n $SSH_ALIAS "dokku docker-options:add $app_name build '--build-arg ${key}=\"${escaped_value}\"'" || true
-        done < <(echo "$deployment" | jq -c '.build_args | to_entries[]')
+        done < <(printf '%s' "$build_args_json" | jq -c 'to_entries[]')
     fi
 
     # Change to source directory for git push
