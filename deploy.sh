@@ -88,7 +88,7 @@ show_help() {
     echo ""
     echo "Options:"
     echo "  --dry-run           Show what would be deployed without deploying"
-    echo "  --force             Force deployment even if commits match (for config changes)"
+    echo "  --force             Force deployment even if commits match, and allow force-push to Dokku if histories diverge"
     echo "  --config-only       Only update env vars and restart (no code deploy)"
     echo "  --no-prod           Skip production deployments"
     echo "  --force-mysql-expose Apply root mysql_expose even on filtered deploys"
@@ -725,7 +725,14 @@ for deployment in "${FILTERED_DEPLOYMENTS[@]}"; do
     fi
 done
 
-if [ "$FORCE_MYSQL_EXPOSE" = true ] || ([ ${#SELECTED_DEPLOYMENTS[@]} -eq 0 ] && [ ${#FILTER_TAGS[@]} -eq 0 ] && [ "$NO_PROD" = false ]); then
+APPLY_MYSQL_EXPOSE=false
+if [ "$FORCE_MYSQL_EXPOSE" = true ]; then
+    APPLY_MYSQL_EXPOSE=true
+elif [ ${#SELECTED_DEPLOYMENTS[@]} -eq 0 ] && [ ${#FILTER_TAGS[@]} -eq 0 ] && [ "$NO_PROD" = false ]; then
+    APPLY_MYSQL_EXPOSE=true
+fi
+
+if [ "$APPLY_MYSQL_EXPOSE" = true ]; then
     if ! apply_mysql_expose_config "$CONFIG_FILE"; then
         echo -e "${RED}Failed to apply mysql_expose configuration${NC}"
         exit 1
