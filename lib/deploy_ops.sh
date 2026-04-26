@@ -554,6 +554,30 @@ deploy_app() {
     fi
     echo ""
 
+    # Refuse to deploy a local branch tip that differs from origin/<branch>
+    # unless the operator explicitly opts in via --force.
+    if git rev-parse --verify "origin/$repo_branch" >/dev/null 2>&1; then
+        local repo_branch_commit=""
+        local origin_commit=""
+        repo_branch_commit=$(git -C "$repo_root" rev-parse "$repo_branch" 2>/dev/null || echo "")
+        origin_commit=$(git -C "$repo_root" rev-parse "origin/$repo_branch" 2>/dev/null || echo "")
+
+        if [ -n "$repo_branch_commit" ] && [ -n "$origin_commit" ] && [ "$repo_branch_commit" != "$origin_commit" ]; then
+            echo -e "${RED}Error: Local branch '$repo_branch' does not match origin/$repo_branch for $app_name${NC}"
+            echo -e "${YELLOW}   $repo_branch:        ${repo_branch_commit:0:8}${NC}"
+            echo -e "${YELLOW}   origin/$repo_branch: ${origin_commit:0:8}${NC}"
+            echo -e "${YELLOW}Refusing to deploy a local commit that is not identical to origin/$repo_branch.${NC}"
+            if [ "$FORCE_DEPLOY" = true ]; then
+                echo -e "${YELLOW}--force supplied, continuing anyway with local $repo_branch${NC}"
+            else
+                echo -e "${YELLOW}If this is intentional, rerun with --force.${NC}"
+                echo -e "${YELLOW}Otherwise sync the branch first and retry.${NC}"
+                cd "$SCRIPT_DIR"
+                return 1
+            fi
+        fi
+    fi
+
     # Create remote if doesn't exist (needed for fetch)
     # Use app-specific remote name to avoid conflicts when deploying multiple apps from same repo
     local remote_name="dokku-$app_name"
@@ -598,6 +622,7 @@ deploy_app() {
         local_commit=$(git -C "$repo_root" rev-parse "$repo_branch" 2>/dev/null)
     fi
     local remote_commit=$(git rev-parse "$remote_name/$dokku_branch" 2>/dev/null || echo "")
+    local force_rebuild_only=false
 
     if [ "$FORCE_DEPLOY" = false ] && [ -n "$remote_commit" ] && [ "$local_commit" = "$remote_commit" ]; then
         echo -e "${GREEN}Remote is already up-to-date (${local_commit:0:8}), skipping deployment${NC}"
@@ -613,6 +638,10 @@ deploy_app() {
         echo -e "${BLUE}   Remote: ${remote_commit:0:8}${NC}"
     else
         echo -e "${BLUE}   Remote: (new app)${NC}"
+    fi
+    if [ "$FORCE_DEPLOY" = true ] && [ -n "$remote_commit" ] && [ "$local_commit" = "$remote_commit" ]; then
+        force_rebuild_only=true
+        echo -e "${YELLOW}Force mode with unchanged commit: will apply config/build args and run dokku ps:rebuild${NC}"
     fi
     echo -e "${YELLOW}Changes detected, proceeding with deployment${NC}"
     echo ""
@@ -988,22 +1017,40 @@ deploy_app() {
     echo ""
 
     # Deploy
-    echo -e "${GREEN}Pushing to Dokku...${NC}"
-    echo ""
-
-    # Try to push without force first
-    local push_ref="$repo_branch"
-    if [ -n "$subtree_prefix_effective" ]; then
-        push_ref="$local_commit"
-    fi
-    if git push "$remote_name" "$push_ref:refs/heads/$dokku_branch"; then
+    if [ "$force_rebuild_only" = true ]; then
+        echo -e "${GREEN}Rebuilding existing Dokku app with updated config/build args...${NC}"
         echo ""
-        echo -e "${GREEN}Pushed successfully${NC}"
+        ssh -n $SSH_ALIAS "dokku ps:rebuild $app_name" || {
+            echo -e "${RED}Failed to rebuild $app_name${NC}"
+            cd "$SCRIPT_DIR"
+            return 1
+        }
     else
-        # If that fails, it's likely a new app or history diverged
         echo ""
-        echo -e "${YELLOW}Normal push failed, attempting force push...${NC}"
-        git push "$remote_name" "$push_ref:refs/heads/$dokku_branch" -f
+        echo -e "${GREEN}Pushing to Dokku...${NC}"
+        echo ""
+
+        # Try to push without force first
+        local push_ref="$repo_branch"
+        if [ -n "$subtree_prefix_effective" ]; then
+            push_ref="$local_commit"
+        fi
+        if git push "$remote_name" "$push_ref:refs/heads/$dokku_branch"; then
+            echo ""
+            echo -e "${GREEN}Pushed successfully${NC}"
+        else
+            echo ""
+            if [ "$FORCE_DEPLOY" = true ]; then
+                echo -e "${YELLOW}Normal push failed, attempting force push because --force was supplied...${NC}"
+                git push "$remote_name" "$push_ref:refs/heads/$dokku_branch" -f
+            else
+                echo -e "${RED}Normal push failed and automatic force-push is disabled.${NC}"
+                echo -e "${YELLOW}This usually means Dokku history diverged or the remote branch tip is ahead.${NC}"
+                echo -e "${YELLOW}If you intentionally want to overwrite Dokku history, rerun with --force.${NC}"
+                cd "$SCRIPT_DIR"
+                return 1
+            fi
+        fi
     fi
 
     # Run post-deploy hook if it exists
