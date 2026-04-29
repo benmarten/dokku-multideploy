@@ -246,9 +246,12 @@ import_from_server() {
             echo -e "  Let's Encrypt: active"
         fi
 
-        # Get deploy branch
+        # Prefer the recorded source ref over Dokku's internal deploy branch.
         local branch
-        branch=$(ssh "$ssh_alias" "dokku git:report $app" 2>/dev/null | grep "Git deploy branch:" | awk '{print $NF}')
+        branch=$(ssh "$ssh_alias" "dokku config:get $app GIT_REF" 2>/dev/null | head -n1 | xargs || true)
+        if [ -z "$branch" ]; then
+            branch=$(ssh "$ssh_alias" "dokku git:report $app" 2>/dev/null | grep "Git deploy branch:" | awk '{print $NF}')
+        fi
         [ -z "$branch" ] && branch="master"
 
         # Get builder type

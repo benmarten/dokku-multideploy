@@ -366,9 +366,7 @@ run_sync_check() {
 
         local diff_fields=()
         local field
-        # Branch is intentionally excluded from sync drift checks: config branch selects
-        # source code branch, while Dokku deploy branch is standardized to master.
-        for field in builder postgres letsencrypt ports storage_mounts docker_options extra_domains dokku_settings; do
+        for field in branch builder postgres letsencrypt ports storage_mounts docker_options extra_domains dokku_settings; do
             local local_val
             local remote_val
             local_val=$(echo "$local_summary" | jq -c ".$field")
@@ -391,6 +389,15 @@ run_sync_check() {
             # Treat unspecified builder as equivalent to Dokku's default selected builder.
             if [ "$field" = "builder" ]; then
                 if [ "$local_val" = "null" ] && { [ "$remote_val" = "null" ] || [ "$remote_val" = "\"herokuish\"" ] || [ "$remote_val" = "\"selected:\"" ] || [ "$remote_val" = "\"selected\"" ]; }; then
+                    continue
+                fi
+            fi
+
+            # Dokku's internal deploy branch defaults to master. Treat it as equivalent
+            # to main for drift detection when comparing branch names.
+            if [ "$field" = "branch" ]; then
+                if { [ "$local_val" = "\"main\"" ] && [ "$remote_val" = "\"master\"" ]; } || \
+                   { [ "$local_val" = "\"master\"" ] && [ "$remote_val" = "\"main\"" ]; }; then
                     continue
                 fi
             fi

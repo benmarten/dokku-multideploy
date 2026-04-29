@@ -419,7 +419,7 @@ Compare local `config.json` against live Dokku state without deploying:
    - `✓ In sync`
    - `✗ Missing on Dokku`
    - `⚠ Drift` with per-field differences
-4. `branch` is ignored in drift detection (local `branch` is source selection; Dokku deploy target is standardized to `master`)
+4. `branch` is compared using Dokku `GIT_REF` when present, falling back to the Dokku deploy branch only if `GIT_REF` is unset; `main` and `master` are treated as equivalent defaults
 
 Cache options:
 - `--refresh-sync`: refresh `.sync-cache/config.json` before comparing
