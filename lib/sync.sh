@@ -25,6 +25,211 @@ normalize_bool_status() {
     esac
 }
 
+merge_json_objects() {
+    local base_json="$1"
+    local extra_json="$2"
+    printf '%s' "$base_json" | jq -c --argjson extra "$extra_json" '. + $extra'
+}
+
+load_effective_file_overlays() {
+    local root_dir="$1"
+    local source_dir="$2"
+    local domain="$3"
+    local include_shared="$4"
+
+    local runtime_extra="{}"
+    local build_extra="{}"
+    local runtime_files=()
+    local build_files=()
+
+    if [ "$include_shared" = true ] && [ -n "$source_dir" ] && [ "$source_dir" != "." ]; then
+        runtime_files+=("$root_dir/.env/_$source_dir")
+        build_files+=("$root_dir/.env/_$source_dir.build")
+    fi
+    runtime_files+=("$root_dir/.env/$domain")
+    build_files+=("$root_dir/.env/$domain.build")
+
+    local file
+    for file in "${runtime_files[@]}"; do
+        if [ -f "$file" ]; then
+            runtime_extra=$(merge_json_objects "$runtime_extra" "$(parse_env_file_to_json "$file")")
+        fi
+    done
+
+    for file in "${build_files[@]}"; do
+        if [ -f "$file" ]; then
+            build_extra=$(merge_json_objects "$build_extra" "$(parse_env_file_to_json "$file")")
+        fi
+    done
+
+    jq -cn --argjson runtime "$runtime_extra" --argjson build "$build_extra" '{runtime: $runtime, build: $build}'
+}
+
+enrich_summary_with_file_overlays() {
+    local summary_json="$1"
+    local root_dir="$2"
+    local include_shared="$3"
+
+    local source_dir
+    source_dir=$(printf '%s' "$summary_json" | jq -r '.source_dir // "."')
+    local domain
+    domain=$(printf '%s' "$summary_json" | jq -r '.domain // empty')
+    local overlays
+    overlays=$(load_effective_file_overlays "$root_dir" "$source_dir" "$domain" "$include_shared")
+
+    local enriched_summary
+    enriched_summary=$(printf '%s' "$summary_json" | jq -c \
+        --argjson runtime_extra "$(printf '%s' "$overlays" | jq -c '.runtime')" \
+        --argjson build_extra "$(printf '%s' "$overlays" | jq -c '.build')" '
+        .env_vars = (((.env_vars // {}) + $runtime_extra) | to_entries | sort_by(.key) | from_entries)
+        | .build_args = (((.build_args // {}) + $build_extra) | to_entries | sort_by(.key) | from_entries)
+    ')
+
+    printf '%s' "$enriched_summary" | jq -c \
+        --argjson filtered_env "$(strip_ignored_sync_keys_json "$(printf '%s' "$enriched_summary" | jq -c '.env_vars // {}')")" \
+        --argjson filtered_build "$(strip_ignored_sync_keys_json "$(printf '%s' "$enriched_summary" | jq -c '.build_args // {}')")" '
+        .env_vars = $filtered_env
+        | .build_args = $filtered_build
+    '
+}
+
+split_json_by_sensitivity() {
+    local input_json="$1"
+    local mode="$2"
+    local result="{}"
+
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        local key
+        local value
+        key=$(printf '%s' "$line" | jq -r '.key')
+        value=$(printf '%s' "$line" | jq -r '.value')
+
+        if is_ignored_sync_key "$key"; then
+            continue
+        fi
+
+        local is_secret=false
+        if is_sensitive_env_key "$key"; then
+            is_secret=true
+        fi
+
+        if { [ "$mode" = "secret" ] && [ "$is_secret" = true ]; } || \
+           { [ "$mode" = "public" ] && [ "$is_secret" = false ]; }; then
+            result=$(printf '%s' "$result" | jq -c --arg key "$key" --arg value "$value" '. + {($key): $value}')
+        fi
+    done < <(printf '%s' "$input_json" | jq -c 'to_entries[]?')
+
+    printf '%s' "$result"
+}
+
+write_json_to_env_file() {
+    local file="$1"
+    local json_payload="$2"
+
+    mkdir -p "$(dirname "$file")"
+
+    if ! printf '%s' "$json_payload" | jq -e 'type == "object" and length > 0' > /dev/null 2>&1; then
+        rm -f "$file"
+        return 0
+    fi
+
+    local tmp_file
+    tmp_file=$(mktemp "${TMPDIR:-/tmp}/dokku-sync-env.XXXXXX")
+    if ! printf '%s' "$json_payload" | jq -r 'to_entries | sort_by(.key)[] | "\(.key)=\(.value)"' > "$tmp_file"; then
+        rm -f "$tmp_file"
+        return 1
+    fi
+    mv "$tmp_file" "$file"
+}
+
+load_env_file_json() {
+    local file="$1"
+    if [ -f "$file" ]; then
+        parse_env_file_to_json "$file"
+    else
+        echo "{}"
+    fi
+}
+
+distribute_secret_json_by_existing_ownership() {
+    local secret_json="$1"
+    local shared_file="$2"
+    local domain_file="$3"
+
+    local shared_existing
+    shared_existing=$(load_env_file_json "$shared_file")
+    local domain_existing
+    domain_existing=$(load_env_file_json "$domain_file")
+
+    local shared_result="{}"
+    local domain_result="{}"
+
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        local key
+        local value
+        key=$(printf '%s' "$line" | jq -r '.key')
+        value=$(printf '%s' "$line" | jq -r '.value')
+
+        if printf '%s' "$shared_existing" | jq -e --arg key "$key" 'has($key)' > /dev/null 2>&1; then
+            shared_result=$(printf '%s' "$shared_result" | jq -c --arg key "$key" --arg value "$value" '. + {($key): $value}')
+        else
+            domain_result=$(printf '%s' "$domain_result" | jq -c --arg key "$key" --arg value "$value" '. + {($key): $value}')
+        fi
+    done < <(printf '%s' "$secret_json" | jq -c 'to_entries[]?')
+
+    # Preserve keys already stored in shared files unless we are actively updating them,
+    # so a single-domain sync-apply cannot accidentally erase secrets used by siblings.
+    shared_result=$(printf '%s' "$shared_existing" | jq -c --argjson updates "$shared_result" '. + $updates')
+
+    jq -cn --argjson shared "$shared_result" --argjson domain "$domain_result" '{shared: $shared, domain: $domain}'
+}
+
+sync_apply_summary_to_secret_files() {
+    local domain="$1"
+    local remote_summary="$2"
+    local diff_fields_json="$3"
+
+    local secret_dir="$SCRIPT_DIR/.env"
+    local source_dir
+    source_dir=$(printf '%s' "$remote_summary" | jq -r '.source_dir // "."')
+    local shared_env_file="$secret_dir/_$source_dir"
+    local shared_build_file="$secret_dir/_$source_dir.build"
+    local domain_env_file="$secret_dir/$domain"
+    local domain_build_file="$secret_dir/$domain.build"
+    local env_secret_json="{}"
+    local build_secret_json="{}"
+
+    if printf '%s' "$diff_fields_json" | jq -e 'index("env_vars")' > /dev/null 2>&1; then
+        env_secret_json=$(split_json_by_sensitivity "$(printf '%s' "$remote_summary" | jq -c '.env_vars // {}')" secret)
+        local env_distribution
+        env_distribution=$(distribute_secret_json_by_existing_ownership "$env_secret_json" "$shared_env_file" "$domain_env_file")
+        if ! write_json_to_env_file "$domain_env_file" "$(printf '%s' "$env_distribution" | jq -c '.domain')"; then
+            return 1
+        fi
+        if [ -f "$shared_env_file" ] || [ "$source_dir" != "." -a "$source_dir" != "" ]; then
+            if ! write_json_to_env_file "$shared_env_file" "$(printf '%s' "$env_distribution" | jq -c '.shared')"; then
+                return 1
+            fi
+        fi
+    fi
+
+    if printf '%s' "$diff_fields_json" | jq -e 'index("build_args")' > /dev/null 2>&1; then
+        build_secret_json=$(split_json_by_sensitivity "$(printf '%s' "$remote_summary" | jq -c '.build_args // {}')" secret)
+        local build_distribution
+        build_distribution=$(distribute_secret_json_by_existing_ownership "$build_secret_json" "$shared_build_file" "$domain_build_file")
+        if ! write_json_to_env_file "$domain_build_file" "$(printf '%s' "$build_distribution" | jq -c '.domain')"; then
+            return 1
+        fi
+        if [ -f "$shared_build_file" ] || [ "$source_dir" != "." -a "$source_dir" != "" ]; then
+            if ! write_json_to_env_file "$shared_build_file" "$(printf '%s' "$build_distribution" | jq -c '.shared')"; then
+                return 1
+            fi
+        fi
+    fi
+}
+
 sync_apply_summary_to_child_patch() {
     local remote_summary="$1"
     local diff_fields_json="$2"
@@ -33,10 +238,26 @@ sync_apply_summary_to_child_patch() {
             (map(capture("^(?<plugin>[^:]+):(?<key>[^=]+)=(?<value>.*)$"))
             | reduce .[] as $entry ({}; .[$entry.plugin] = ((.[$entry.plugin] // {}) + {($entry.key): $entry.value})));
         {
+            source_dir: (.source_dir // "."),
+            domain: (.domain // null),
             branch: (.branch // null),
             builder: (.builder // null),
             postgres: (if .postgres == true then true else null end),
             letsencrypt: (if .letsencrypt == true then true else null end),
+            env_vars: (
+                if (.env_vars | length) > 0 then
+                    (.env_vars | to_entries | sort_by(.key) | from_entries)
+                else
+                    null
+                end
+            ),
+            build_args: (
+                if (.build_args | length) > 0 then
+                    (.build_args | to_entries | sort_by(.key) | from_entries)
+                else
+                    null
+                end
+            ),
             ports: (if (.ports | length) > 0 then .ports else null end),
             storage_mounts: (if (.storage_mounts | length) > 0 then .storage_mounts else null end),
             docker_options: (if (.docker_options | length) > 0 then .docker_options else null end),
@@ -57,20 +278,29 @@ apply_sync_patch_to_config() {
     if ! jq --arg domain "$domain" --argjson patch "$child_patch" '
         reduce (to_entries[]
             | select(.value | type == "object" and has("deployments"))
-            | select(.value.deployments | has($domain))
-            | .key) as $parent_key
+            | select(.value.deployments | has($domain))) as $parent_entry
             (.;
-                .[$parent_key].deployments[$domain] |= (
-                    . as $child
-                    | (if ($patch | has("branch")) then (if ($patch.branch == null) then del(.branch) else .branch = $patch.branch end) else . end)
-                    | (if ($patch | has("builder")) then (if ($patch.builder == null) then del(.builder) else .builder = $patch.builder end) else . end)
-                    | (if ($patch | has("postgres")) then (if ($patch.postgres == null) then del(.postgres) else .postgres = true end) else . end)
-                    | (if ($patch | has("letsencrypt")) then (if ($patch.letsencrypt == null) then del(.letsencrypt) else .letsencrypt = true end) else . end)
-                    | (if ($patch | has("ports")) then (if ($patch.ports == null) then del(.ports) else .ports = $patch.ports end) else . end)
-                    | (if ($patch | has("storage_mounts")) then (if ($patch.storage_mounts == null) then del(.storage_mounts) else .storage_mounts = $patch.storage_mounts end) else . end)
-                    | (if ($patch | has("docker_options")) then (if ($patch.docker_options == null) then del(.docker_options) else .docker_options = $patch.docker_options end) else . end)
-                    | (if ($patch | has("extra_domains")) then (if ($patch.extra_domains == null) then del(.extra_domains) else .extra_domains = $patch.extra_domains end) else . end)
-                    | (if ($patch | has("dokku_settings")) then (if ($patch.dokku_settings == null) then del(.dokku_settings) else .dokku_settings = $patch.dokku_settings end) else . end)
+                .[$parent_entry.key] |= (
+                    . as $parent
+                    # If the parent only has one deployment, effective env/build config is
+                    # simpler and less surprising when kept entirely at child level.
+                    | (($parent.deployments | length) == 1) as $single_deployment_parent
+                    | (if $single_deployment_parent and ($patch | has("env_vars")) then del(.env_vars) else . end)
+                    | (if $single_deployment_parent and ($patch | has("build_args")) then del(.build_args) else . end)
+                    | .deployments[$domain] |= (
+                        . as $child
+                        | (if ($patch | has("branch")) then (if ($patch.branch == null) then del(.branch) else .branch = $patch.branch end) else . end)
+                        | (if ($patch | has("builder")) then (if ($patch.builder == null) then del(.builder) else .builder = $patch.builder end) else . end)
+                        | (if ($patch | has("postgres")) then (if ($patch.postgres == null) then del(.postgres) else .postgres = true end) else . end)
+                        | (if ($patch | has("letsencrypt")) then (if ($patch.letsencrypt == null) then del(.letsencrypt) else .letsencrypt = true end) else . end)
+                        | (if ($patch | has("env_vars")) then (if ($patch.env_vars == null) then del(.env_vars) else .env_vars = $patch.env_vars end) else . end)
+                        | (if ($patch | has("build_args")) then (if ($patch.build_args == null) then del(.build_args) else .build_args = $patch.build_args end) else . end)
+                        | (if ($patch | has("ports")) then (if ($patch.ports == null) then del(.ports) else .ports = $patch.ports end) else . end)
+                        | (if ($patch | has("storage_mounts")) then (if ($patch.storage_mounts == null) then del(.storage_mounts) else .storage_mounts = $patch.storage_mounts end) else . end)
+                        | (if ($patch | has("docker_options")) then (if ($patch.docker_options == null) then del(.docker_options) else .docker_options = $patch.docker_options end) else . end)
+                        | (if ($patch | has("extra_domains")) then (if ($patch.extra_domains == null) then del(.extra_domains) else .extra_domains = $patch.extra_domains end) else . end)
+                        | (if ($patch | has("dokku_settings")) then (if ($patch.dokku_settings == null) then del(.dokku_settings) else .dokku_settings = $patch.dokku_settings end) else . end)
+                    )
                 )
             )
     ' "$CONFIG_FILE" > "$tmp_file"; then
@@ -98,10 +328,14 @@ get_effective_local_summary_for_domain() {
             | select(.key == $domain)
             | .value as $child
             | {
+                source_dir: ($child.source_dir // $parent.source_dir // "."),
+                domain: $domain,
                 branch: ($child.branch // $parent.branch // null),
                 builder: ($child.builder // $parent.builder // null),
                 postgres: (($child.postgres // $parent.postgres // false) == true or ($child.postgres // $parent.postgres // false) == "true"),
                 letsencrypt: (($child.letsencrypt // $parent.letsencrypt // false) == true or ($child.letsencrypt // $parent.letsencrypt // false) == "true"),
+                env_vars: ((($parent.env_vars // {}) + ($child.env_vars // {})) | to_entries | sort_by(.key) | from_entries),
+                build_args: ((($parent.build_args // {}) + ($child.build_args // {})) | to_entries | sort_by(.key) | from_entries),
                 ports: (($child.ports // $parent.ports // []) | map(tostring) | sort),
                 storage_mounts: ((($child.storage_mounts // []) + ($parent.storage_mounts // [])) | map(tostring) | sort),
                 docker_options: ((($child.docker_options // []) + ($parent.docker_options // [])) | map(tostring) | sort),
@@ -233,7 +467,7 @@ run_sync_check() {
         mkdir -p "$sync_dir_resolved"
         local previous_no_clone="$IMPORT_NO_CLONE"
         IMPORT_NO_CLONE=true
-        import_from_server "$sync_dir_resolved" "$SSH_ALIAS" false >/dev/null
+        import_from_server "$sync_dir_resolved" "$SSH_ALIAS" true >/dev/null
         IMPORT_NO_CLONE="$previous_no_clone"
         echo -e "${GREEN}Using fresh sync state${NC} (${BLUE}$(file_mtime_human "$remote_config")${NC})"
     else
@@ -261,10 +495,14 @@ run_sync_check() {
                 app_name: ($parent_key | gsub("_"; "-")),
                 domain: $domain,
                 summary: {
+                    source_dir: ($child.source_dir // $parent.source_dir // "."),
+                    domain: $domain,
                     branch: ($child.branch // $parent.branch // null),
                     builder: ($child.builder // $parent.builder // null),
                     postgres: (($child.postgres // $parent.postgres // false) == true or ($child.postgres // $parent.postgres // false) == "true"),
                     letsencrypt: (($child.letsencrypt // $parent.letsencrypt // false) == true or ($child.letsencrypt // $parent.letsencrypt // false) == "true"),
+                    env_vars: ((($parent.env_vars // {}) + ($child.env_vars // {})) | to_entries | sort_by(.key) | from_entries),
+                    build_args: ((($parent.build_args // {}) + ($child.build_args // {})) | to_entries | sort_by(.key) | from_entries),
                     ports: (($child.ports // $parent.ports // []) | map(tostring) | sort),
                     storage_mounts: ((($child.storage_mounts // []) + ($parent.storage_mounts // [])) | map(tostring) | sort),
                     docker_options: ((($child.docker_options // []) + ($parent.docker_options // [])) | map(tostring) | sort),
@@ -311,10 +549,14 @@ run_sync_check() {
         app_name=$(echo "$domain" | tr '.' '-')
         local local_summary
         local_summary=$(echo "$deployment" | jq -c '{
+            source_dir: (.source_dir // "."),
+            domain: (.domain // null),
             branch: (.branch // null),
             builder: (.builder // null),
             postgres: (.postgres == true),
             letsencrypt: (.letsencrypt == true),
+            env_vars: ((.env_vars // {}) | to_entries | sort_by(.key) | from_entries),
+            build_args: ((.build_args // {}) | to_entries | sort_by(.key) | from_entries),
             ports: ((.ports // [])
                 | map(tostring)
                 | (if (length == 1 and (.[0] | test("^http:80:[0-9]+$"))) then [] else . end)
@@ -341,6 +583,7 @@ run_sync_check() {
                 | sort
             )
         }')
+        local_summary=$(enrich_summary_with_file_overlays "$local_summary" "$SCRIPT_DIR" true)
 
         local remote_domain
         remote_domain=$(jq -r --arg app "$app_name" '
@@ -350,6 +593,9 @@ run_sync_check() {
         remote_summary=$(jq -c --arg app "$app_name" '
             first(.[] | select(.app_name == $app) | .summary) // empty
         ' "$remote_index")
+        if [ -n "$remote_summary" ]; then
+            remote_summary=$(enrich_summary_with_file_overlays "$remote_summary" "$sync_dir_resolved" false)
+        fi
 
         if [ -z "$remote_summary" ]; then
             echo -e "${RED}✗ Missing on Dokku:${NC} $domain"
@@ -366,7 +612,7 @@ run_sync_check() {
 
         local diff_fields=()
         local field
-        for field in branch builder postgres letsencrypt ports storage_mounts docker_options extra_domains dokku_settings; do
+        for field in branch builder postgres letsencrypt env_vars build_args ports storage_mounts docker_options extra_domains dokku_settings; do
             local local_val
             local remote_val
             local_val=$(echo "$local_summary" | jq -c ".$field")
@@ -435,6 +681,18 @@ run_sync_check() {
                 local remaining_diff_fields=()
                 diff_fields_json=$(printf '%s\n' "${diff_fields[@]}" | jq -R . | jq -s .)
                 child_patch=$(sync_apply_summary_to_child_patch "$remote_summary" "$diff_fields_json")
+                if printf '%s' "$child_patch" | jq -e 'has("env_vars")' > /dev/null 2>&1; then
+                    child_patch=$(printf '%s' "$child_patch" | jq -c \
+                        --argjson public_env "$(split_json_by_sensitivity "$(printf '%s' "$remote_summary" | jq -c '.env_vars // {}')" public)" '
+                        .env_vars = (if $public_env == {} then null else $public_env end)
+                    ')
+                fi
+                if printf '%s' "$child_patch" | jq -e 'has("build_args")' > /dev/null 2>&1; then
+                    child_patch=$(printf '%s' "$child_patch" | jq -c \
+                        --argjson public_build "$(split_json_by_sensitivity "$(printf '%s' "$remote_summary" | jq -c '.build_args // {}')" public)" '
+                        .build_args = (if $public_build == {} then null else $public_build end)
+                    ')
+                fi
                 if [ "$DRY_RUN" = true ]; then
                     echo -e "   ${BLUE}apply${NC}"
                     echo -e "     mode  : dry-run"
@@ -459,6 +717,15 @@ run_sync_check() {
                     fi
 
                     post_apply_summary=$(get_effective_local_summary_for_domain "$domain")
+                    if ! sync_apply_summary_to_secret_files "$domain" "$remote_summary" "$diff_fields_json"; then
+                        echo -e "   ${RED}apply${NC}"
+                        echo -e "     result: failed to patch local secret env files"
+                        apply_failed_count=$((apply_failed_count + 1))
+                        mismatch_count=$((mismatch_count + 1))
+                        sync_ok=false
+                        continue
+                    fi
+                    post_apply_summary=$(enrich_summary_with_file_overlays "$post_apply_summary" "$SCRIPT_DIR" true)
                     if [ -z "$post_apply_summary" ] || [ "$post_apply_summary" = "null" ]; then
                         echo -e "   ${RED}apply${NC}"
                         echo -e "     result: patch applied but could not re-evaluate effective local config"

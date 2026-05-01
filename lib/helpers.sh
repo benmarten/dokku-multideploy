@@ -1,3 +1,78 @@
+is_sensitive_env_key() {
+    local key_upper
+    key_upper=$(echo "$1" | tr '[:lower:]' '[:upper:]')
+
+    # Explicitly public frontend/runtime prefixes should stay in config.json
+    # even when the suffix contains words like TOKEN or KEY.
+    if [[ "$key_upper" =~ ^(NUXT_PUBLIC_|NEXT_PUBLIC_|PUBLIC_|VITE_) ]]; then
+        return 1
+    fi
+
+    case "$key_upper" in
+        APP_KEYS|CREATE_SUPERUSER)
+            return 0
+            ;;
+    esac
+
+    # Keep likely credentials/secrets in .env files instead of config.json.
+    if [[ "$key_upper" =~ (^|_)(SECRET|PASSWORD|PASS|PASSWD|TOKEN|PRIVATE|CERT|COOKIE|SESSION|JWT|SIGNING|ENCRYPTION|DSN|CONNECTION_STRING)($|_) ]]; then
+        return 0
+    fi
+    if [[ "$key_upper" =~ (^|_)(API_KEY|ACCESS_KEY|SECRET_KEY|CLIENT_SECRET|PRIVATE_KEY|DB_PASSWORD|DATABASE_PASSWORD)($|_) ]]; then
+        return 0
+    fi
+    # Catch suffix-style keys like GITHUBTOKEN that omit underscore separators.
+    if [[ "$key_upper" =~ (TOKEN|SECRET|PASSWORD|PASSWD|JWT|DSN)($|_) ]]; then
+        return 0
+    fi
+    if [[ "$key_upper" =~ (^|_)KEYS?($|_) ]]; then
+        return 0
+    fi
+
+    return 1
+}
+
+ignored_sync_keys_json() {
+    local default_keys_json='["GIT_REF","GIT_REV"]'
+
+    if [ -n "${DOKKU_MULTIDEPLOY_IGNORED_SYNC_KEYS:-}" ]; then
+        printf '%s' "$DOKKU_MULTIDEPLOY_IGNORED_SYNC_KEYS" | tr ', ' '\n\n' | awk 'NF { print toupper($0) }' | jq -R . | jq -s .
+        return
+    fi
+
+    if [ -n "${CONFIG_FILE:-}" ] && [ -f "$CONFIG_FILE" ]; then
+        local config_keys_json
+        config_keys_json=$(jq -c '
+            (.sync.ignored_keys // .ignored_sync_keys // [])
+            | map(ascii_upcase)
+        ' "$CONFIG_FILE" 2>/dev/null || echo "[]")
+
+        jq -cn --argjson defaults "$default_keys_json" --argjson config_keys "$config_keys_json" '
+            ($defaults + $config_keys) | unique
+        '
+        return
+    fi
+
+    printf '%s' "$default_keys_json"
+}
+
+is_ignored_sync_key() {
+    local key_upper
+    key_upper=$(echo "$1" | tr '[:lower:]' '[:upper:]')
+
+    printf '%s' "$(ignored_sync_keys_json)" | jq -e --arg key "$key_upper" 'index($key)' > /dev/null 2>&1
+}
+
+strip_ignored_sync_keys_json() {
+    local input_json="$1"
+    local ignored_keys_json
+    ignored_keys_json=$(ignored_sync_keys_json)
+
+    printf '%s' "$input_json" | jq -c --argjson ignored "$ignored_keys_json" '
+        with_entries(select(.key as $key | ($ignored | index($key) | not)))
+    '
+}
+
 parse_env_file() {
     local file=$1
     local result=""
