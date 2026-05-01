@@ -425,6 +425,7 @@ Compare local `config.json` against live Dokku state without deploying:
 7. Sync ignores generic deploy metadata keys such as `GIT_REF` and `GIT_REV`; extend this list with `sync.ignored_keys` in `config.json` or `DOKKU_MULTIDEPLOY_IGNORED_SYNC_KEYS` for repo-specific build metadata such as `APP_VERSION`, `GIT_SHA`, or `NUXT_VIEWTLAB_VERSION`
 8. `--sync-apply` writes public keys back into child `env_vars` / `build_args`, and secret-like keys into `.env/<domain>` / `.env/<domain>.build`
 9. When a secret already lives in a shared overlay (`.env/_<source_dir>` or `.env/_<source_dir>.build`), `--sync-apply` keeps updating that shared file instead of flattening it into a per-domain file
+10. Secret/public classification can be tuned per repo with `sync.sensitive_keys` and `sync.public_keys` in `config.json`
 
 Cache options:
 - `--refresh-sync`: refresh `.sync-cache/config.json` before comparing

@@ -1,6 +1,32 @@
+sync_config_key_array_json() {
+    local jq_expr="$1"
+
+    if [ -n "${CONFIG_FILE:-}" ] && [ -f "$CONFIG_FILE" ]; then
+        jq -c "$jq_expr | map(ascii_upcase)" "$CONFIG_FILE" 2>/dev/null || echo "[]"
+    else
+        echo "[]"
+    fi
+}
+
+sync_sensitive_keys_json() {
+    sync_config_key_array_json '(.sync.sensitive_keys // .sensitive_keys // [])'
+}
+
+sync_public_keys_json() {
+    sync_config_key_array_json '(.sync.public_keys // .public_keys // [])'
+}
+
 is_sensitive_env_key() {
     local key_upper
     key_upper=$(echo "$1" | tr '[:lower:]' '[:upper:]')
+
+    if printf '%s' "$(sync_public_keys_json)" | jq -e --arg key "$key_upper" 'index($key)' > /dev/null 2>&1; then
+        return 1
+    fi
+
+    if printf '%s' "$(sync_sensitive_keys_json)" | jq -e --arg key "$key_upper" 'index($key)' > /dev/null 2>&1; then
+        return 0
+    fi
 
     # Explicitly public frontend/runtime prefixes should stay in config.json
     # even when the suffix contains words like TOKEN or KEY.
@@ -21,8 +47,17 @@ is_sensitive_env_key() {
     if [[ "$key_upper" =~ (^|_)(API_KEY|ACCESS_KEY|SECRET_KEY|CLIENT_SECRET|PRIVATE_KEY|DB_PASSWORD|DATABASE_PASSWORD)($|_) ]]; then
         return 0
     fi
+    if [[ "$key_upper" =~ (ACCESSKEY|SECRETKEY|PRIVATEKEY|CLIENTSECRET)($|_) ]]; then
+        return 0
+    fi
     # Catch suffix-style keys like GITHUBTOKEN that omit underscore separators.
     if [[ "$key_upper" =~ (TOKEN|SECRET|PASSWORD|PASSWD|JWT|DSN)($|_) ]]; then
+        return 0
+    fi
+    if [[ "$key_upper" =~ SERVICE_ACCOUNT ]]; then
+        return 0
+    fi
+    if [[ "$key_upper" =~ (B64|BASE64)($|_) ]]; then
         return 0
     fi
     if [[ "$key_upper" =~ (^|_)KEYS?($|_) ]]; then

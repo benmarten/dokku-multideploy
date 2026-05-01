@@ -51,6 +51,8 @@ assert_public() {
 assert_secret "APP_KEYS"
 assert_secret "RETRIEVERS_0_GITHUBTOKEN"
 assert_secret "CREATE_SUPERUSER"
+assert_secret "CRONICLE_Storage__AWS__credentials__secretAccessKey"
+assert_secret "GOOGLE_SERVICE_ACCOUNT_B64"
 assert_public "NUXT_PUBLIC_SHARED_API_TOKEN"
 
 if ! is_ignored_sync_key "GIT_SHA"; then
@@ -81,6 +83,10 @@ if is_ignored_sync_key "GIT_REF"; then
     fail "expected env override to replace default ignored keys"
 fi
 unset DOKKU_MULTIDEPLOY_IGNORED_SYNC_KEYS
+
+printf '{\"sync\":{\"ignored_keys\":[\"APP_VERSION\",\"GIT_SHA\",\"NUXT_VIEWTLAB_VERSION\"],\"sensitive_keys\":[\"TWITTER_CLIENT_ID\"],\"public_keys\":[\"GOOGLE_CLIENT_ID\"]}}\n' > "$CONFIG_FILE"
+assert_secret "TWITTER_CLIENT_ID"
+assert_public "GOOGLE_CLIENT_ID"
 
 mkdir -p "$SCRIPT_DIR/.env/_apps"
 printf 'GIT_REF=main\nKEEP_SHARED=yes\n' > "$SCRIPT_DIR/.env/_apps/viewtlab-frontend"
