@@ -72,6 +72,9 @@ BACKUP_MODE=false
 BACKUP_DIR=""
 RESTORE_MODE=false
 RESTORE_DIR=""
+STOP_MODE=false
+START_MODE=false
+RESTART_MODE=false
 SETUP_MODE=false
 SETUP_EMAIL=""
 SYNC_MODE=false
@@ -104,6 +107,9 @@ show_help() {
     echo "  --backup            Backup PostgreSQL/MySQL databases and storage mounts"
     echo "  --restore <dir>     Restore PostgreSQL/MySQL databases and storage from backup dir"
     echo "  --backup-dir <dir>  Backup directory (default: ./backups)"
+    echo "  --stop              Stop apps (use with --tag to stop by tag)"
+    echo "  --start             Start apps (use with --tag to start by tag)"
+    echo "  --restart           Restart apps (use with --tag to restart by tag)"
     echo "  --setup             Setup a fresh Dokku server (install plugins, configure)"
     echo "  --email <email>     Let's Encrypt email (use with --setup)"
     echo "  --sync              Compare local config against live Dokku state"
@@ -138,6 +144,11 @@ show_help() {
     echo "  $0 --backup --tag production            # Backup only production apps"
     echo "  $0 --backup api.example.com             # Backup specific app"
     echo "  $0 --restore ./backups/2026-02-25_125435 # Restore from backup directory"
+    echo ""
+    echo "App management:"
+    echo "  $0 --stop --tag nonprod                  # Stop all nonprod apps"
+    echo "  $0 --start --tag production              # Start all production apps"
+    echo "  $0 --restart api.example.com             # Restart specific app"
     echo ""
     echo "Setup a fresh Dokku server:"
     echo "  $0 --setup --email admin@example.com   # Setup server from config.json"
@@ -233,6 +244,18 @@ while [[ $# -gt 0 ]]; do
         --backup-dir)
             BACKUP_DIR="$2"
             shift 2
+            ;;
+        --stop)
+            STOP_MODE=true
+            shift
+            ;;
+        --start)
+            START_MODE=true
+            shift
+            ;;
+        --restart)
+            RESTART_MODE=true
+            shift
             ;;
         --setup)
             SETUP_MODE=true
@@ -694,6 +717,45 @@ if [ "$BACKUP_MODE" = true ]; then
         fi
     fi
     echo ""
+    exit 0
+fi
+
+# Handle stop/start/restart modes
+if [ "$STOP_MODE" = true ] || [ "$START_MODE" = true ] || [ "$RESTART_MODE" = true ]; then
+    if [ "$STOP_MODE" = true ]; then
+        ACTION="stop"
+        ACTION_VERB="Stopping"
+    elif [ "$START_MODE" = true ]; then
+        ACTION="start"
+        ACTION_VERB="Starting"
+    else
+        ACTION="restart"
+        ACTION_VERB="Restarting"
+    fi
+
+    echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
+    echo -e "${BLUE}   dokku-multideploy - ${ACTION_VERB} Apps${NC}"
+    echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
+    echo ""
+
+    for deployment in "${FILTERED_DEPLOYMENTS[@]}"; do
+        domain=$(echo "$deployment" | jq -r '.domain')
+        app_name=$(echo "$domain" | tr '.' '-')
+
+        echo -e "${BLUE}${ACTION_VERB}: $app_name${NC}"
+        if [ "$DRY_RUN" = true ]; then
+            echo -e "${YELLOW}   [DRY RUN] Would run: dokku ps:${ACTION} $app_name${NC}"
+        else
+            if ssh $SSH_ALIAS "dokku ps:${ACTION} $app_name" 2>&1; then
+                echo -e "${GREEN}   ${ACTION^}ed successfully${NC}"
+            else
+                echo -e "${RED}   Failed to ${ACTION}${NC}"
+            fi
+        fi
+        echo ""
+    done
+
+    echo -e "${GREEN}${ACTION^} operation complete!${NC}"
     exit 0
 fi
 
