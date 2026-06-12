@@ -404,6 +404,8 @@ restore_app() {
                 ssh $SSH_ALIAS "sudo mkdir -p '$host_path'" || true
                 if xz -dc "$storage_backup" | ssh $SSH_ALIAS "sudo tar -C / -xf -" >/dev/null; then
                     echo -e "${GREEN}   Restored storage mount: $host_path${NC}"
+                    echo -e "${BLUE}   Fixing permissions: $host_path${NC}"
+                    ssh $SSH_ALIAS "sudo chown -R 32767:32767 '$host_path' && sudo chmod -R u+w '$host_path'" || true
                     restored_any_storage=true
                 else
                     echo -e "${RED}   Failed to restore storage mount: $host_path${NC}"
@@ -425,6 +427,8 @@ restore_app() {
             ssh $SSH_ALIAS "sudo mkdir -p '$legacy_storage_base'" || true
             if xz -dc "$legacy_storage_backup" | ssh $SSH_ALIAS "sudo tar -C '$legacy_storage_base' -xf -" >/dev/null; then
                 echo -e "${GREEN}   Restored storage for: $app_name${NC}"
+                echo -e "${BLUE}   Fixing permissions: $legacy_storage_base${NC}"
+                ssh $SSH_ALIAS "sudo chown -R 32767:32767 '$legacy_storage_base' && sudo chmod -R u+w '$legacy_storage_base'" || true
                 restored_any_storage=true
             else
                 echo -e "${RED}   Failed to restore storage for: $app_name${NC}"
