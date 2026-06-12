@@ -15,7 +15,12 @@ Deploy multiple applications to a single Dokku server with centralized configura
 - **MySQL service exposure** - Optional `mysql:expose` automation for local-only DB access
 - **Storage mounts, ports, domains** - Full Dokku configuration support
 - **Server import/migration** - Import all apps from existing server, migrate to new server
-- **Backup & Restore** - Backup/restore PostgreSQL databases and storage mounts with xz compression
+- **Backup & Restore** - Backup/restore PostgreSQL/MySQL databases and storage mounts with xz compression
+- **App management** - Stop, start, or restart apps by tag or name
+
+## Documentation
+
+- [Server Migration Guide](docs/SERVER_MIGRATION.md) - Complete guide for migrating between Dokku servers
 
 ## Prerequisites
 
