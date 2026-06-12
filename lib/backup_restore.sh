@@ -27,6 +27,8 @@ print_skipped_migration_summary() {
 
 backup_mysql_services() {
     local backup_dir=$1
+    shift
+    local filter_dbs=("$@")
     local has_mysql=false
 
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -50,6 +52,21 @@ backup_mysql_services() {
 
     while IFS= read -r service; do
         [ -z "$service" ] && continue
+
+        # If filter list provided, only backup services in that list
+        if [ ${#filter_dbs[@]} -gt 0 ]; then
+            local should_backup=false
+            for filter_db in "${filter_dbs[@]}"; do
+                if [ "$service" = "$filter_db" ]; then
+                    should_backup=true
+                    break
+                fi
+            done
+            if [ "$should_backup" = false ]; then
+                continue
+            fi
+        fi
+
         has_mysql=true
         local mysql_backup="$backup_dir/${service}.sql.xz"
         echo -e "${BLUE}Backing up MySQL database: $service${NC}"
@@ -103,7 +120,30 @@ restore_mysql_services() {
 
         if ! ssh $SSH_ALIAS "dokku mysql:exists $service" 2>/dev/null; then
             echo -e "${BLUE}   Creating missing MySQL service: $service${NC}"
-            ssh $SSH_ALIAS "dokku mysql:create $service" || true
+            ssh $SSH_ALIAS "sudo dokku mysql:create $service" || true
+        fi
+
+        # Always ensure service is started before import
+        echo -e "${BLUE}   Ensuring MySQL service is running...${NC}"
+        ssh $SSH_ALIAS "dokku mysql:start $service" 2>/dev/null || true
+
+        # Wait for MySQL to be ready for connections
+        local retries=0
+        local max_retries=30
+        while [ $retries -lt $max_retries ]; do
+            if ssh $SSH_ALIAS "dokku mysql:info $service" 2>/dev/null | grep -q "running"; then
+                # Additional check: try to connect
+                sleep 3
+                if ssh $SSH_ALIAS "dokku mysql:list" 2>/dev/null | grep -q "$service"; then
+                    break
+                fi
+            fi
+            sleep 2
+            retries=$((retries + 1))
+        done
+
+        if [ $retries -eq $max_retries ]; then
+            echo -e "${YELLOW}   Warning: MySQL service may not be fully ready${NC}"
         fi
 
         if xz -dc "$file" | ssh $SSH_ALIAS "dokku mysql:import $service" >/dev/null 2>&1; then

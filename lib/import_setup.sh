@@ -550,6 +550,124 @@ import_from_server() {
     echo ""
 }
 
+seed_remote_root_public_key() {
+    local ssh_alias="$1"
+
+    echo -e "${BLUE}Ensuring remote root SSH key exists for Dokku install...${NC}"
+    ssh "$ssh_alias" "bash -se" <<'REMOTE'
+set -euo pipefail
+install -d -m 0700 /root/.ssh
+if [ ! -f /root/.ssh/id_rsa.pub ]; then
+    ssh-keygen -t rsa -b 4096 -N '' -f /root/.ssh/id_rsa -C "root@$(hostname)-dokku"
+fi
+chmod 0700 /root/.ssh
+chmod 0600 /root/.ssh/id_rsa
+chmod 0644 /root/.ssh/id_rsa.pub
+REMOTE
+}
+
+detect_local_public_key() {
+    if [ -n "${DOKKU_DEPLOY_PUBLIC_KEY:-}" ]; then
+        printf '%s\n' "$DOKKU_DEPLOY_PUBLIC_KEY"
+        return 0
+    fi
+
+    local key_path
+    for key_path in "${DOKKU_DEPLOY_PUBLIC_KEY_FILE:-}" "$HOME/.ssh/id_rsa.pub" "$HOME/.ssh/id_ed25519.pub"; do
+        if [ -n "$key_path" ] && [ -f "$key_path" ]; then
+            cat "$key_path"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+ensure_local_dokku_deploy_key() {
+    local ssh_alias="$1"
+    local key_name="${DOKKU_DEPLOY_KEY_NAME:-admin}"
+    local public_key
+    local public_key_b64
+
+    if ! public_key=$(detect_local_public_key); then
+        echo -e "${YELLOW}No local public key found; skipping Dokku deploy key setup${NC}"
+        echo -e "${YELLOW}Set DOKKU_DEPLOY_PUBLIC_KEY_FILE or add a key manually with dokku ssh-keys:add${NC}"
+        return 0
+    fi
+    public_key_b64=$(printf '%s\n' "$public_key" | base64 | tr -d '\n')
+
+    echo -e "${BLUE}Ensuring local deploy key is authorized in Dokku...${NC}"
+    ssh "$ssh_alias" "DOKKU_KEY_NAME='$key_name' DOKKU_PUBLIC_KEY_B64='$public_key_b64' bash -se" <<'REMOTE'
+set -euo pipefail
+tmp_key="$(mktemp)"
+printf '%s' "$DOKKU_PUBLIC_KEY_B64" | base64 -d > "$tmp_key"
+fingerprint="$(ssh-keygen -lf "$tmp_key" | awk '{print $2}')"
+
+if dokku ssh-keys:list 2>/dev/null | grep -Fq "$fingerprint"; then
+    rm -f "$tmp_key"
+    echo "Deploy key already present: $fingerprint"
+    exit 0
+fi
+
+key_name="$DOKKU_KEY_NAME"
+if dokku ssh-keys:list 2>/dev/null | grep -Eq "NAME=\"${key_name}\""; then
+    key_name="${key_name}-$(date +%Y%m%d%H%M%S)"
+fi
+
+dokku ssh-keys:add "$key_name" "$tmp_key"
+rm -f "$tmp_key"
+echo "Deploy key added as: $key_name"
+REMOTE
+}
+
+recover_docker_content_store() {
+    local ssh_alias="$1"
+
+    echo -e "${YELLOW}Docker/containerd content store appears corrupt; resetting Docker state and retrying...${NC}"
+    ssh "$ssh_alias" "bash -se" <<'REMOTE'
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+systemctl stop docker containerd 2>/dev/null || true
+rm -rf /var/lib/docker /var/lib/containerd
+systemctl start docker 2>/dev/null || true
+dpkg --configure -a
+apt-get install -f -y
+REMOTE
+}
+
+repair_dokku_package_state_if_needed() {
+    local ssh_alias="$1"
+
+    if ssh "$ssh_alias" "dpkg --audit | grep -Eiq 'dokku|herokuish|docker|containerd'" 2>/dev/null; then
+        echo -e "${YELLOW}Detected incomplete Dokku/Docker package configuration.${NC}"
+        recover_docker_content_store "$ssh_alias"
+    fi
+}
+
+install_dokku_with_recovery() {
+    local ssh_alias="$1"
+    local install_log
+    install_log=$(mktemp)
+
+    if ssh "$ssh_alias" "wget -NP . https://dokku.com/bootstrap.sh && sudo DOKKU_TAG=v0.35.16 bash bootstrap.sh" >"$install_log" 2>&1; then
+        cat "$install_log"
+        rm -f "$install_log"
+        return 0
+    fi
+
+    cat "$install_log"
+
+    if grep -qiE "blob .* not found|containerd.*blob.*not found|failed to lease content" "$install_log"; then
+        recover_docker_content_store "$ssh_alias"
+        rm -f "$install_log"
+        ssh "$ssh_alias" "sudo DOKKU_TAG=v0.35.16 bash bootstrap.sh"
+        return $?
+    fi
+
+    rm -f "$install_log"
+    return 1
+}
+
 setup_server() {
     local ssh_alias="$1"
     local letsencrypt_email="$2"
@@ -574,6 +692,7 @@ setup_server() {
     if ssh "$ssh_alias" "command -v dokku" &>/dev/null; then
         local dokku_version=$(ssh -n "$ssh_alias" "dokku version" 2>/dev/null || echo "unknown")
         echo -e "${GREEN}Dokku is installed (version: $dokku_version)${NC}"
+        repair_dokku_package_state_if_needed "$ssh_alias"
     else
         echo -e "${YELLOW}Dokku is not installed${NC}"
         echo ""
@@ -581,13 +700,17 @@ setup_server() {
         if [ "$confirm" = "yes" ]; then
             echo -e "${BLUE}Installing Dokku...${NC}"
             echo -e "${YELLOW}This may take a few minutes...${NC}"
-            ssh "$ssh_alias" "wget -NP . https://dokku.com/bootstrap.sh && sudo DOKKU_TAG=v0.35.16 bash bootstrap.sh"
+            seed_remote_root_public_key "$ssh_alias"
+            install_dokku_with_recovery "$ssh_alias"
             echo -e "${GREEN}Dokku installed${NC}"
         else
             echo -e "${RED}Dokku is required. Exiting.${NC}"
             exit 1
         fi
     fi
+    echo ""
+
+    ensure_local_dokku_deploy_key "$ssh_alias"
     echo ""
 
     # Install/check required plugins
@@ -609,21 +732,19 @@ setup_server() {
 
     # Configure Let's Encrypt email
     echo -e "${BLUE}Configuring Let's Encrypt...${NC}"
-    local current_email=$(ssh -n "$ssh_alias" "dokku letsencrypt:set --global email 2>/dev/null | grep -oE '[^ ]+@[^ ]+'" || echo "")
+    local current_email=$(ssh -n "$ssh_alias" "dokku letsencrypt:report --global 2>/dev/null | grep -oE '[^ ]+@[^ ]+' | head -n1" || echo "")
 
-    if [ -n "$current_email" ]; then
+    if [ -n "$letsencrypt_email" ]; then
+        if [ "$letsencrypt_email" = "$current_email" ]; then
+            echo -e "${GREEN}Let's Encrypt email already set: $current_email${NC}"
+        else
+            ssh "$ssh_alias" "dokku letsencrypt:set --global email $letsencrypt_email"
+            echo -e "${GREEN}Let's Encrypt email configured: $letsencrypt_email${NC}"
+        fi
+    elif [ -n "$current_email" ]; then
         echo -e "${GREEN}Let's Encrypt email already set: $current_email${NC}"
-        if [ -n "$letsencrypt_email" ] && [ "$letsencrypt_email" != "$current_email" ]; then
-            read -p "Update to $letsencrypt_email? (yes/no): " confirm
-            if [ "$confirm" = "yes" ]; then
-                ssh "$ssh_alias" "dokku letsencrypt:set --global email $letsencrypt_email"
-                echo -e "${GREEN}Email updated${NC}"
-            fi
-        fi
     else
-        if [ -z "$letsencrypt_email" ]; then
-            read -p "Enter Let's Encrypt email address: " letsencrypt_email
-        fi
+        read -p "Enter Let's Encrypt email address: " letsencrypt_email
         if [ -n "$letsencrypt_email" ]; then
             ssh "$ssh_alias" "dokku letsencrypt:set --global email $letsencrypt_email"
             echo -e "${GREEN}Let's Encrypt email configured: $letsencrypt_email${NC}"
@@ -641,6 +762,6 @@ setup_server() {
     echo -e "Server is ready for deployments. Next steps:"
     echo -e "  1. Update ${BLUE}config.json${NC} with the new server's SSH alias/host"
     echo -e "  2. Run ${BLUE}./deploy.sh --dry-run${NC} to preview deployments"
-    echo -e "  3. Deploy a test app: ${BLUE}./deploy.sh csvfilter.e7ad.cc${NC}"
+    echo -e "  3. Deploy a test app: ${BLUE}./deploy.sh <app-name>${NC}"
     echo ""
 }

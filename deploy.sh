@@ -62,6 +62,7 @@ YES_TO_ALL=false
 FORCE_DEPLOY=false
 CONFIG_ONLY=false
 FORCE_MYSQL_EXPOSE=false
+LIST_MODE=false
 IMPORT_MODE=false
 IMPORT_DIR=""
 IMPORT_SECRETS=true
@@ -93,6 +94,8 @@ show_help() {
     echo "  --no-prod           Skip production deployments"
     echo "  --force-mysql-expose Apply root mysql_expose even on filtered deploys"
     echo "  --yes               Skip confirmation prompts (use with caution)"
+    echo "  --config <file>     Use a specific config JSON file"
+    echo "  --list              List deployments in the selected config"
     echo "  --tag <tag>         Deploy only apps with this tag (can be used multiple times)"
     echo "  --import <dir>      Import apps from Dokku server to <dir> (all apps by default)"
     echo "  --ssh <alias>       SSH alias for Dokku server (use with --import)"
@@ -119,6 +122,8 @@ show_help() {
     echo "  $0 --tag api --force-mysql-expose # Deploy filtered app(s) and still apply mysql_expose"
     echo "  $0 --tag api                     # Deploy only apps tagged 'api'"
     echo "  $0 --tag staging --tag api       # Deploy apps tagged 'staging' OR 'api'"
+    echo "  $0 --list                        # List all configured deployments"
+    echo "  $0 --list api                    # List deployments matching 'api'"
     echo "  $0 api.example.com               # Deploy specific app"
     echo "  $0 api.example.com www.example.com  # Deploy multiple apps"
     echo ""
@@ -136,6 +141,8 @@ show_help() {
     echo ""
     echo "Setup a fresh Dokku server:"
     echo "  $0 --setup --email admin@example.com   # Setup server from config.json"
+    echo "  $0 --setup config.nonprod.json         # Setup server from a specific config"
+    echo "  $0 --config config.nonprod.json --setup # Same as above"
     echo "  $0 --setup --ssh co-new --email a@b.c  # Setup specific server"
     echo "  $0 --setup                              # Interactive setup (prompts for email)"
     echo "  $0 --sync                               # Check config drift against Dokku"
@@ -169,6 +176,22 @@ while [[ $# -gt 0 ]]; do
             ;;
         --yes|-y)
             YES_TO_ALL=true
+            shift
+            ;;
+        --config)
+            if [ $# -lt 2 ] || [[ "$2" == -* ]]; then
+                echo -e "${RED}Error: --config requires a file argument${NC}"
+                exit 1
+            fi
+            CONFIG_FILE="$2"
+            if [[ "$CONFIG_FILE" != /* ]]; then
+                CONFIG_FILE="$PWD/$CONFIG_FILE"
+            fi
+            SCRIPT_DIR="$(cd "$(dirname "$CONFIG_FILE")" && pwd)"
+            shift 2
+            ;;
+        --list)
+            LIST_MODE=true
             shift
             ;;
         --tag)
@@ -253,13 +276,21 @@ while [[ $# -gt 0 ]]; do
             exit 1
             ;;
         *)
-            SELECTED_DEPLOYMENTS+=("$1")
+            if [ -f "$1" ] && [[ "$1" == *.json ]]; then
+                CONFIG_FILE="$1"
+                if [[ "$CONFIG_FILE" != /* ]]; then
+                    CONFIG_FILE="$PWD/$CONFIG_FILE"
+                fi
+                SCRIPT_DIR="$(cd "$(dirname "$CONFIG_FILE")" && pwd)"
+            else
+                SELECTED_DEPLOYMENTS+=("$1")
+            fi
             shift
             ;;
     esac
 done
 
-if [ "$SYNC_MODE" = true ] && { [ "$IMPORT_MODE" = true ] || [ "$SETUP_MODE" = true ] || [ "$BACKUP_MODE" = true ] || [ "$RESTORE_MODE" = true ] || [ "$CONFIG_ONLY" = true ]; }; then
+if [ "$SYNC_MODE" = true ] && { [ "$IMPORT_MODE" = true ] || [ "$SETUP_MODE" = true ] || [ "$BACKUP_MODE" = true ] || [ "$RESTORE_MODE" = true ] || [ "$CONFIG_ONLY" = true ] || [ "$LIST_MODE" = true ]; }; then
     echo -e "${RED}Error: --sync cannot be combined with --import, --setup, --backup, --restore, or --config-only${NC}"
     exit 1
 fi
@@ -365,6 +396,9 @@ if [ "$SETUP_MODE" = true ]; then
         echo "Use --ssh <alias> or ensure config.json exists with ssh_alias"
         exit 1
     fi
+    if [ -z "$SETUP_EMAIL" ] && [ -f "$CONFIG_FILE" ]; then
+        SETUP_EMAIL=$(jq -r '.letsencrypt_email // empty' "$CONFIG_FILE" 2>/dev/null || true)
+    fi
     setup_server "$SETUP_SSH" "$SETUP_EMAIL"
     exit 0
 fi
@@ -383,23 +417,28 @@ if [ ! -f "$CONFIG_FILE" ]; then
 fi
 
 # Get SSH host and alias from config (export for hooks)
-export SSH_HOST=$(jq -r '.ssh_host' "$CONFIG_FILE")
 export SSH_ALIAS=$(jq -r '.ssh_alias // .ssh_host' "$CONFIG_FILE")
+export SSH_HOST=$(jq -r '.ssh_host // empty' "$CONFIG_FILE")
+if [ -z "$SSH_HOST" ] || [ "$SSH_HOST" = "null" ]; then
+    SSH_HOST="dokku@$SSH_ALIAS"
+fi
 
 echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
 echo -e "${BLUE}   dokku-multideploy${NC}"
 echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
 echo ""
 
-# Check SSH connectivity
-echo -e "${BLUE}Checking Dokku connectivity...${NC}"
-if ! ssh -o ConnectTimeout=10 $SSH_ALIAS "echo 'Connection OK'" &>/dev/null; then
-    echo -e "${RED}Cannot connect to Dokku at $SSH_ALIAS${NC}"
-    echo -e "${RED}Please check your SSH configuration and network connection${NC}"
-    exit 1
+if [ "$LIST_MODE" = false ]; then
+    # Check SSH connectivity
+    echo -e "${BLUE}Checking Dokku connectivity...${NC}"
+    if ! ssh -o ConnectTimeout=10 $SSH_ALIAS "echo 'Connection OK'" &>/dev/null; then
+        echo -e "${RED}Cannot connect to Dokku at $SSH_ALIAS${NC}"
+        echo -e "${RED}Please check your SSH configuration and network connection${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}Connected to Dokku${NC}"
+    echo ""
 fi
-echo -e "${GREEN}Connected to Dokku${NC}"
-echo ""
 
 if [ "$DRY_RUN" = true ]; then
     echo -e "${YELLOW}DRY RUN MODE - No actual deployments will occur${NC}"
@@ -482,6 +521,49 @@ for parent_type in $(jq -r 'to_entries[] | select(.value | type == "object" and 
         DEPLOYMENTS+=("$merged")
     done
 done
+
+if [ "$LIST_MODE" = true ]; then
+    config_name=$(basename "$CONFIG_FILE")
+    count=0
+    echo -e "${GREEN}Deployments in $config_name:${NC}"
+    if [ ${#SELECTED_DEPLOYMENTS[@]} -gt 0 ]; then
+        echo -e "${BLUE}Filter:${NC} ${SELECTED_DEPLOYMENTS[*]}"
+    fi
+    for deployment in "${DEPLOYMENTS[@]}"; do
+        domain=$(echo "$deployment" | jq -r '.domain')
+        source_dir=$(echo "$deployment" | jq -r '.source_dir')
+        tags=$(echo "$deployment" | jq -r '.tags | join(", ")' 2>/dev/null || echo "")
+
+        if [ ${#SELECTED_DEPLOYMENTS[@]} -gt 0 ]; then
+            haystack="${domain} ${source_dir} ${tags}"
+            haystack_lower="${haystack,,}"
+            matched=false
+            for selected in "${SELECTED_DEPLOYMENTS[@]}"; do
+                selected_lower="${selected,,}"
+                if [[ "$haystack_lower" == *"$selected_lower"* ]]; then
+                    matched=true
+                    break
+                fi
+            done
+            if [ "$matched" = false ]; then
+                continue
+            fi
+        fi
+
+        if [ -n "$tags" ]; then
+            echo -e "  ${BLUE}•${NC} $domain ${BLUE}($source_dir)${NC} [$tags]"
+        else
+            echo -e "  ${BLUE}•${NC} $domain ${BLUE}($source_dir)${NC}"
+        fi
+        count=$((count + 1))
+    done
+    if [ "$count" -eq 0 ]; then
+        echo -e "${YELLOW}No deployments match the list filter${NC}"
+    else
+        echo -e "${GREEN}Total: $count${NC}"
+    fi
+    exit 0
+fi
 
 # Filter deployments
 FILTERED_DEPLOYMENTS=()
@@ -576,8 +658,21 @@ if [ "$BACKUP_MODE" = true ]; then
         echo ""
     fi
 
-    # Backup MySQL services globally (not necessarily app-name derived)
-    backup_mysql_services "$BACKUP_DIR"
+    # Extract MySQL database names from filtered deployments
+    MYSQL_DBS_TO_BACKUP=()
+    for deployment in "${FILTERED_DEPLOYMENTS[@]}"; do
+        db_host=$(echo "$deployment" | jq -r '.env_vars.DATABASE_HOST // empty')
+        if [[ "$db_host" =~ ^dokku-mysql-(.+)$ ]]; then
+            MYSQL_DBS_TO_BACKUP+=("${BASH_REMATCH[1]}")
+        fi
+    done
+
+    # Backup MySQL services (filtered by what the selected apps actually use)
+    if [ ${#MYSQL_DBS_TO_BACKUP[@]} -gt 0 ]; then
+        backup_mysql_services "$BACKUP_DIR" "${MYSQL_DBS_TO_BACKUP[@]}"
+    else
+        backup_mysql_services "$BACKUP_DIR"
+    fi
 
     # Backup each app
     for deployment in "${FILTERED_DEPLOYMENTS[@]}"; do

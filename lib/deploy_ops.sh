@@ -175,7 +175,12 @@ apply_dokku_networks_config() {
         return 1
     fi
 
-    dokku_networks_json=$(jq -c '.dokku_networks // []' "$config_file")
+    dokku_networks_json=$(jq -c '
+        ((.dokku_networks // [])
+        + ([.. | objects | .dokku_settings? | objects | .network? | objects | ."attach-post-create"? // empty]
+            | map(select(type == "string" and length > 0))))
+        | unique
+    ' "$config_file")
     if ! echo "$dokku_networks_json" | jq -e 'type == "array" and length > 0' > /dev/null 2>&1; then
         return 0
     fi
@@ -594,7 +599,12 @@ deploy_app() {
     # Dokku deploy target is standardized to master for all apps.
     local dokku_branch="master"
 
-    # Fetch remote state quietly
+    # Clear stale cached state before fetching. If this local checkout has
+    # deployed the same app name to an older Dokku host, Git may retain
+    # refs/remotes/<remote>/<branch>. A fresh Dokku app has no deploy branch
+    # yet, so a failed fetch would otherwise leave that stale ref in place and
+    # make us incorrectly choose ps:rebuild instead of the first push.
+    git update-ref -d "refs/remotes/$remote_name/$dokku_branch" 2>/dev/null || true
     git fetch "$remote_name" "$dokku_branch" 2>/dev/null || true
 
     local local_commit=""
