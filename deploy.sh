@@ -725,12 +725,18 @@ if [ "$STOP_MODE" = true ] || [ "$START_MODE" = true ] || [ "$RESTART_MODE" = tr
     if [ "$STOP_MODE" = true ]; then
         ACTION="stop"
         ACTION_VERB="Stopping"
+        ACTION_PAST="Stopped"
+        ACTION_COMPLETE="Stop"
     elif [ "$START_MODE" = true ]; then
         ACTION="start"
         ACTION_VERB="Starting"
+        ACTION_PAST="Started"
+        ACTION_COMPLETE="Start"
     else
         ACTION="restart"
         ACTION_VERB="Restarting"
+        ACTION_PAST="Restarted"
+        ACTION_COMPLETE="Restart"
     fi
 
     echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
@@ -747,7 +753,7 @@ if [ "$STOP_MODE" = true ] || [ "$START_MODE" = true ] || [ "$RESTART_MODE" = tr
             echo -e "${YELLOW}   [DRY RUN] Would run: dokku ps:${ACTION} $app_name${NC}"
         else
             if ssh $SSH_ALIAS "dokku ps:${ACTION} $app_name" 2>&1; then
-                echo -e "${GREEN}   ${ACTION^}ed successfully${NC}"
+                echo -e "${GREEN}   ${ACTION_PAST} successfully${NC}"
             else
                 echo -e "${RED}   Failed to ${ACTION}${NC}"
             fi
@@ -755,7 +761,7 @@ if [ "$STOP_MODE" = true ] || [ "$START_MODE" = true ] || [ "$RESTART_MODE" = tr
         echo ""
     done
 
-    echo -e "${GREEN}${ACTION^} operation complete!${NC}"
+    echo -e "${GREEN}${ACTION_COMPLETE} operation complete!${NC}"
     exit 0
 fi
 
