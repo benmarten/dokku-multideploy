@@ -847,7 +847,7 @@ deploy_app() {
                 # Extract host path from mount spec (format: /host/path:/container/path)
                 local host_path="${mount_path%%:*}"
                 echo -e "${BLUE}   Ensuring storage directory exists: $host_path${NC}"
-                ssh $SSH_ALIAS "sudo mkdir -p '$host_path' && sudo chown -R 32767:32767 '$host_path' && sudo chmod -R u+w '$host_path'" || true
+                ssh $SSH_ALIAS "sudo mkdir -p '$host_path' && sudo chmod -R 777 '$host_path'" || true
 
                 echo -e "${BLUE}   Mounting $mount_path${NC}"
                 ssh $SSH_ALIAS "dokku storage:mount $app_name $mount_path" || true
