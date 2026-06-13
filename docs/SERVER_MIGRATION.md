@@ -130,6 +130,9 @@ ssh viewtlab "rsync -avz --progress \
 ssh viewtlab "rsync -avz --progress \
   /var/lib/dokku/data/storage/www-viewtlab-com-be/uploads/ \
   viewtlab-prod:/var/lib/dokku/data/storage/www-viewtlab-com-be/uploads/"
+
+# Re-apply configured storage ownership/permissions on the target after rsync.
+CONFIG_FILE=config.prod.json deploy --config-only --tag production
 ```
 
 **Why server-to-server rsync?**
@@ -169,6 +172,9 @@ ssh viewtlab "rsync -avz --progress \
 ssh viewtlab "rsync -avz --progress \
   /var/lib/dokku/data/storage/sentry-viewtlab-com/ \
   viewtlab-nonprod:/var/lib/dokku/data/storage/sentry-viewtlab-com/"
+
+# 7. Re-apply configured storage ownership/permissions on the target
+CONFIG_FILE=config.nonprod.json deploy --config-only --tag nonprod
 ```
 
 ## Verification
