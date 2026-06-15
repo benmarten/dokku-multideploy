@@ -315,6 +315,21 @@ apply_config_only() {
         fi
     fi
 
+    # Configure docker options (e.g., -p port:port for non-HTTP ports)
+    if echo "$deployment" | jq -e '.docker_options | length > 0' > /dev/null 2>&1; then
+        echo -e "${BLUE}Configuring docker options...${NC}"
+
+        # Clear existing deploy docker options to prevent duplicates
+        echo -e "${BLUE}   Clearing existing docker options...${NC}"
+        ssh $SSH_ALIAS "dokku docker-options:clear $app_name deploy" 2>/dev/null || true
+
+        while IFS= read -r opt; do
+            [ -z "$opt" ] && continue
+            echo -e "${BLUE}   Adding: $opt${NC}"
+            ssh $SSH_ALIAS "dokku docker-options:add $app_name deploy '$opt'" || true
+        done < <(echo "$deployment" | jq -r '.docker_options[]')
+    fi
+
     apply_dokku_settings "$app_name" "$dokku_settings"
 
     # Apply Let's Encrypt SSL in config-only mode when requested
@@ -868,6 +883,11 @@ deploy_app() {
     # Configure docker options (e.g., -p port:port for non-HTTP ports)
     if echo "$deployment" | jq -e '.docker_options | length > 0' > /dev/null 2>&1; then
         echo -e "${BLUE}Configuring docker options...${NC}"
+
+        # Clear existing deploy docker options to prevent duplicates
+        echo -e "${BLUE}   Clearing existing docker options...${NC}"
+        ssh $SSH_ALIAS "dokku docker-options:clear $app_name deploy" 2>/dev/null || true
+
         while IFS= read -r opt; do
             [ -z "$opt" ] && continue
             echo -e "${BLUE}   Adding: $opt${NC}"
