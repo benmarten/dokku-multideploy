@@ -216,6 +216,109 @@ apply_dokku_networks_config() {
     return 0
 }
 
+ensure_public_http_port_mapping() {
+    local deployment=$1
+    local app_name=$2
+
+    local configured_ports detected_ports
+    configured_ports=$(echo "$deployment" | jq -r '.ports[]? // empty' 2>/dev/null)
+    if echo "$configured_ports" | grep -Eq '^http:80:[0-9]+$'; then
+        return 0
+    fi
+
+    # Keep explicit custom mappings, but still expose the app on the standard
+    # Dokku vhost when its only HTTP mapping uses a non-standard host port.
+    detected_ports="$configured_ports"
+    if [ -z "$detected_ports" ]; then
+        detected_ports=$(ssh -n "$SSH_ALIAS" "dokku ports:report $app_name 2>/dev/null" \
+            | sed -n 's/^ *Ports map detected: *//p' | head -n 1)
+    fi
+    [ -n "$detected_ports" ] || return 0
+
+    local mapping scheme host_port container_port public_mapping=""
+    for mapping in $detected_ports; do
+        IFS=: read -r scheme host_port container_port <<< "$mapping"
+        [ "$scheme" = "http" ] || continue
+        [ -n "$container_port" ] || continue
+
+        # Dokku already exposes this app through the public HTTP vhost.
+        if [ "$host_port" = "80" ]; then
+            return 0
+        fi
+
+        public_mapping="http:80:$container_port"
+        break
+    done
+
+    if [ -n "$public_mapping" ]; then
+        echo -e "${BLUE}Adding public HTTP mapping for detected app port: $public_mapping${NC}"
+        ssh -n "$SSH_ALIAS" "dokku ports:add $app_name $public_mapping"
+    fi
+}
+
+install_configured_plugins() {
+    local deployment=$1
+    local app_name=$2
+    local plugin plugin_name
+
+    while IFS= read -r plugin; do
+        [ -z "$plugin" ] && continue
+        if [[ "$plugin" == *" "* ]]; then
+            plugin_name=${plugin##* }
+        else
+            plugin_name=${plugin##*/}
+            plugin_name=${plugin_name%.git}
+        fi
+        if ssh -n "$SSH_ALIAS" "dokku plugin:list" 2>/dev/null \
+            | awk -v name="$plugin_name" '$1 == name { found=1 } END { exit !found }'; then
+            echo -e "${GREEN}Plugin already installed: $plugin_name${NC}"
+            continue
+        fi
+
+        echo -e "${BLUE}Installing plugin for $app_name: $plugin${NC}"
+        if ! ssh -n "$SSH_ALIAS" "dokku plugin:install $plugin"; then
+            echo -e "${RED}Failed to install plugin '$plugin_name' for $app_name${NC}"
+            return 1
+        fi
+    done < <(echo "$deployment" | jq -r '.plugins[]?')
+}
+
+apply_nginx_cors_configuration() {
+    local deployment=$1
+    local app_name=$2
+    local cors_plugin origin current_origin cors_enabled encoded_origin
+
+    cors_plugin=$(echo "$deployment" | jq -r '[.plugins[]? | select(contains("nginx-cors"))] | length > 0')
+    origin=$(echo "$deployment" | jq -r '.nginx_cors_origin // empty')
+    [ "$cors_plugin" = "true" ] || [ -n "$origin" ] || return 0
+
+    if [ "$DRY_RUN" = true ]; then
+        echo -e "${YELLOW}[DRY RUN] Would configure nginx CORS for $app_name${NC}"
+        return 0
+    fi
+
+    if ! ssh -n "$SSH_ALIAS" "dokku plugin:list" 2>/dev/null \
+        | awk '$1 == "nginx-cors" { found=1 } END { exit !found }'; then
+        echo -e "${RED}nginx-cors plugin is required for $app_name but is not installed${NC}"
+        return 1
+    fi
+
+    cors_enabled=$(ssh -n "$SSH_ALIAS" "test -f /home/dokku/$app_name/NGINX_CORS && echo yes" 2>/dev/null || true)
+    if [ -n "$origin" ]; then
+        current_origin=$(ssh -n "$SSH_ALIAS" "cat /home/dokku/$app_name/NGINX_CORS_ORIGIN 2>/dev/null || true")
+        if [ "$current_origin" != "$origin" ] || [ "$cors_enabled" != "yes" ]; then
+            # Send the configured value as data, not shell syntax. This avoids
+            # remote-shell expansion for origins containing quotes or metacharacters.
+            encoded_origin=$(printf '%s' "$origin" | base64 | tr -d '\n')
+            echo -e "${BLUE}Setting nginx CORS origin for $app_name${NC}"
+            ssh -n "$SSH_ALIAS" "origin=\$(printf '%s' '$encoded_origin' | base64 -d) && dokku nginx-cors:set-origin '$app_name' \"\$origin\"" || return 1
+        fi
+    elif [ "$cors_enabled" != "yes" ]; then
+        echo -e "${BLUE}Enabling nginx CORS for $app_name${NC}"
+        ssh -n "$SSH_ALIAS" "dokku nginx-cors:enable $app_name" || return 1
+    fi
+}
+
 apply_config_only() {
     local deployment=$1
     local domain=$(echo "$deployment" | jq -r '.domain')
@@ -242,6 +345,8 @@ apply_config_only() {
         echo -e "${RED}Run a full deploy first to create the app${NC}"
         return 1
     fi
+
+    install_configured_plugins "$deployment" "$app_name" || return 1
 
     # Load secrets from .env files
     local shared_file="$SCRIPT_DIR/.env/_$source_dir"
@@ -314,6 +419,9 @@ apply_config_only() {
             ssh $SSH_ALIAS "dokku ports:set $app_name $ports" || true
         fi
     fi
+
+    ensure_public_http_port_mapping "$deployment" "$app_name"
+    apply_nginx_cors_configuration "$deployment" "$app_name" || return 1
 
     # Configure docker options (e.g., -p port:port for non-HTTP ports)
     if echo "$deployment" | jq -e '.docker_options | length > 0' > /dev/null 2>&1; then
@@ -420,6 +528,45 @@ apply_config_only() {
 
     echo -e "${GREEN}Config updated: $domain${NC}"
     echo ""
+}
+
+sync_imported_registry_auth() {
+    local deployment="$1"
+    local target_app="$2"
+    local source_ssh
+    local source_app
+    local auth_servers
+    source_ssh=$(echo "$deployment" | jq -r '.migration_source_ssh // empty')
+    source_app=$(echo "$deployment" | jq -r '.source_app_name // empty')
+    auth_servers=$(echo "$deployment" | jq -c '.registry_auth_servers // []')
+
+    if [ "$auth_servers" = "[]" ]; then
+        return 0
+    fi
+    if [ -z "$source_ssh" ] || [ -z "$source_app" ]; then
+        echo "Registry credentials are configured for this app but the import source metadata is missing."
+        return 1
+    fi
+    if [ "$source_ssh" = "$SSH_ALIAS" ]; then
+        return 0
+    fi
+    if [[ ! "$source_app" =~ ^[a-zA-Z0-9-]+$ ]] || [[ ! "$target_app" =~ ^[a-zA-Z0-9-]+$ ]]; then
+        echo "Invalid app name in registry credential migration metadata."
+        return 1
+    fi
+    if ! ssh -n "$source_ssh" "sudo test -d '/var/lib/dokku/config/registry/$source_app'"; then
+        echo "Registry credentials for $source_app were reported by Dokku but their credential directory is missing."
+        return 1
+    fi
+    echo "Transferring private registry credentials for $target_app from $source_app."
+    local registry_root="/var/lib/dokku/config/registry"
+    if ! (set -o pipefail
+        ssh -n "$source_ssh" "sudo tar --numeric-owner --acls --xattrs -C '$registry_root' -cpf - '$source_app'" |
+            ssh "$SSH_ALIAS" "sudo tar --numeric-owner --acls --xattrs --transform='s,^$source_app,$target_app,' -C '$registry_root' -xpf -"
+    ); then
+        echo "Failed to transfer private registry credentials for $target_app."
+        return 1
+    fi
 }
 
 deploy_app() {
@@ -677,6 +824,10 @@ deploy_app() {
     # Create app if doesn't exist
     echo -e "${BLUE}Ensuring app exists on Dokku...${NC}"
     ssh $SSH_ALIAS "dokku apps:exists $app_name || dokku apps:create $app_name" || true
+    if ! sync_imported_registry_auth "$deployment" "$app_name"; then
+        cd "$SCRIPT_DIR"
+        return 1
+    fi
     echo -e "${BLUE}Ensuring Dokku deploy branch is master...${NC}"
     ssh $SSH_ALIAS "dokku git:set $app_name deploy-branch master" >/dev/null 2>&1 || true
 
@@ -695,17 +846,7 @@ deploy_app() {
         fi
     fi
 
-    # Install plugins if configured
-    if echo "$deployment" | jq -e '.plugins' > /dev/null 2>&1; then
-        local plugins=$(echo "$deployment" | jq -r '.plugins[]' 2>/dev/null)
-        if [ -n "$plugins" ]; then
-            echo -e "${BLUE}Installing plugins...${NC}"
-            while IFS= read -r plugin; do
-                echo -e "${BLUE}   Installing $plugin${NC}"
-                ssh $SSH_ALIAS "dokku plugin:install $plugin || true" 2>/dev/null
-            done <<< "$plugins"
-        fi
-    fi
+    install_configured_plugins "$deployment" "$app_name" || return 1
 
     # Create and link Postgres database if enabled
     if [ "$enable_postgres" = "true" ]; then
@@ -1103,6 +1244,11 @@ deploy_app() {
 
     # External health checks are intentionally skipped here.
     # Dokku already performs deployment health checks before switching traffic.
+
+    # A detected container port such as http:3000:3000 is not a public vhost.
+    # Add host port 80 unless this app has an explicit ports configuration.
+    ensure_public_http_port_mapping "$deployment" "$app_name"
+    apply_nginx_cors_configuration "$deployment" "$app_name" || return 1
 
     # Enable Let's Encrypt SSL if configured and not already enabled
     if [ "$enable_letsencrypt" = "true" ]; then

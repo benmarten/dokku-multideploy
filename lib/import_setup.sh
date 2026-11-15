@@ -23,6 +23,7 @@ fetch_remote_app_report_bundle() {
         print_section nginx dokku nginx:report \"\$app\"
         print_section network dokku network:report \"\$app\"
         print_section config_export dokku config:export \"\$app\"
+        print_section registry dokku registry:report \"\$app\"
         print_section git_report dokku git:report \"\$app\"
     " 2>/dev/null || true)
 
@@ -118,8 +119,12 @@ import_from_server() {
     local dokku_global_vhosts=""
     dokku_global_vhosts=$(ssh -n "$ssh_alias" "dokku domains:report --global" 2>/dev/null | awk -F': *' '/Domains global vhosts:/{print $2; exit}' | xargs || true)
 
-    # Initialize config structure
-    local config_json='{"ssh_alias": "'$ssh_alias'", "ssh_host": "dokku@'$ssh_host'"}'
+    # Initialize config structure, recording migration source and matching Dokku version.
+    local source_dokku_version
+    source_dokku_version=$(ssh -n "$ssh_alias" "dokku version" 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)
+    [ -z "$source_dokku_version" ] && source_dokku_version="0.38.34"
+    local config_json
+    config_json=$(jq -n --arg ssh_alias "$ssh_alias" --arg ssh_host "dokku@$ssh_host" --arg source "$ssh_alias" --arg version "$source_dokku_version" '{ssh_alias:$ssh_alias, ssh_host:$ssh_host, migration_source_ssh:$source, dokku_version:$version}')
     if [ -n "$import_global_domain" ]; then
         config_json=$(echo "$config_json" | jq --arg gd "$import_global_domain" '. + {global_domain: $gd}')
     fi
@@ -332,6 +337,12 @@ import_from_server() {
         # Get builder type
         local builder=""
         builder=$(extract_remote_app_report_section "$app_report_bundle" builder | sed -n 's/.*Builder selected:[[:space:]]*//p' | head -n1 | xargs)
+        local registry_auth_raw
+        registry_auth_raw=$(extract_remote_app_report_section "$app_report_bundle" registry | sed -n 's/.*Registry auth servers:[[:space:]]*//p' | head -n 1 | xargs || true)
+        local registry_auth_json="[]"
+        if [ -n "$registry_auth_raw" ]; then
+            registry_auth_json=$(jq -cn --arg raw "$registry_auth_raw" '$raw | split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(length > 0))')
+        fi
 
         # Import app-level Dokku plugin settings (nginx + network attach settings).
         local dokku_settings_json="{}"
@@ -493,6 +504,7 @@ import_from_server() {
         local deployment_config=$(jq -n \
             --arg domain "$primary_domain" \
             --arg source_dir "$source_dir_value" \
+            --arg source_app_name "$app" \
             --arg branch "$branch" \
             --arg builder "$builder" \
             --arg postgres "$postgres" \
@@ -504,8 +516,11 @@ import_from_server() {
             --argjson dokku_settings "$dokku_settings_json" \
             --argjson imported_public_env "$imported_public_env_json" \
             --argjson imported_public_build_args "$imported_public_build_args_json" \
+            --argjson registry_auth_servers "$registry_auth_json" \
             '{
                 source_dir: $source_dir,
+                source_app_name: $source_app_name,
+                registry_auth_servers: (if $registry_auth_servers == [] then null else $registry_auth_servers end),
                 branch: $branch,
                 builder: (if $builder == "" then null else $builder end),
                 postgres: (if $postgres == "true" then true else null end),
@@ -646,10 +661,11 @@ repair_dokku_package_state_if_needed() {
 
 install_dokku_with_recovery() {
     local ssh_alias="$1"
+    local dokku_version="$2"
     local install_log
     install_log=$(mktemp)
 
-    if ssh "$ssh_alias" "wget -NP . https://dokku.com/bootstrap.sh && sudo DOKKU_TAG=v0.35.16 bash bootstrap.sh" >"$install_log" 2>&1; then
+    if ssh "$ssh_alias" "wget -NP . https://dokku.com/bootstrap.sh && sudo DOKKU_TAG=v$dokku_version bash bootstrap.sh" >"$install_log" 2>&1; then
         cat "$install_log"
         rm -f "$install_log"
         return 0
@@ -660,7 +676,7 @@ install_dokku_with_recovery() {
     if grep -qiE "blob .* not found|containerd.*blob.*not found|failed to lease content" "$install_log"; then
         recover_docker_content_store "$ssh_alias"
         rm -f "$install_log"
-        ssh "$ssh_alias" "sudo DOKKU_TAG=v0.35.16 bash bootstrap.sh"
+        ssh "$ssh_alias" "sudo DOKKU_TAG=v$dokku_version bash bootstrap.sh"
         return $?
     fi
 
@@ -668,9 +684,52 @@ install_dokku_with_recovery() {
     return 1
 }
 
+repair_dokku_builder_hooks() {
+    local ssh_alias="$1"
+    echo -e "${BLUE}Repairing Dokku builder hooks to use their provided source directory...${NC}"
+    ssh "$ssh_alias" "sudo python3 -" <<'PY'
+from pathlib import Path
+
+root = Path("/var/lib/dokku/plugins/enabled")
+old = b'pushd "$TMP_WORK_DIR"'
+new = b'pushd "$SOURCECODE_WORK_DIR"'
+repaired = 0
+for path in root.glob("*/core-post-extract"):
+    text = path.read_bytes()
+    if old in text:
+        path.write_bytes(text.replace(old, new))
+        repaired += 1
+print(f"Repaired {repaired} builder hook(s)")
+PY
+}
+
+repair_nginx_server_tokens_conflict() {
+    local ssh_alias="$1"
+    echo -e "${BLUE}Checking Nginx server_tokens configuration...${NC}"
+    ssh "$ssh_alias" "sudo python3 -" <<'PY'
+from pathlib import Path
+
+main = Path("/etc/nginx/nginx.conf")
+dokku = Path("/etc/nginx/conf.d/dokku.conf")
+if main.exists() and dokku.exists():
+    text = main.read_text()
+    if "server_tokens build;" in text and "server_tokens off;" in dokku.read_text():
+        main.write_text(text.replace("server_tokens build;", "# server_tokens build; # Dokku sets server_tokens off in conf.d/dokku.conf", 1))
+        print("Removed duplicate nginx.conf server_tokens directive")
+PY
+    if ! ssh "$ssh_alias" "sudo nginx -t && sudo systemctl reload nginx"; then
+        echo -e "${RED}Nginx configuration is invalid on $ssh_alias${NC}"
+        return 1
+    fi
+}
+
 setup_server() {
     local ssh_alias="$1"
     local letsencrypt_email="$2"
+    local desired_dokku_version="0.38.34"
+    if [ -f "$CONFIG_FILE" ]; then
+        desired_dokku_version=$(jq -r '.dokku_version // "0.38.34"' "$CONFIG_FILE" 2>/dev/null || echo "0.38.34")
+    fi
 
     echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
     echo -e "${BLUE}   dokku-multideploy - Server Setup${NC}"
@@ -693,21 +752,39 @@ setup_server() {
         local dokku_version=$(ssh -n "$ssh_alias" "dokku version" 2>/dev/null || echo "unknown")
         echo -e "${GREEN}Dokku is installed (version: $dokku_version)${NC}"
         repair_dokku_package_state_if_needed "$ssh_alias"
+        local installed_dokku_version
+        installed_dokku_version=$(printf '%s' "$dokku_version" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
+        if [ -n "$installed_dokku_version" ] && [ "$installed_dokku_version" != "$desired_dokku_version" ]; then
+            echo -e "${BLUE}Updating Dokku to match the migration source ($desired_dokku_version)...${NC}"
+            if ! ssh "$ssh_alias" "sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y dokku=$desired_dokku_version"; then
+                echo -e "${RED}Failed to install Dokku $desired_dokku_version on $ssh_alias${NC}"
+                return 1
+            fi
+        fi
     else
         echo -e "${YELLOW}Dokku is not installed${NC}"
         echo ""
-        read -p "Install Dokku now? (yes/no): " confirm
+        if [ "${YES_TO_ALL:-false}" = true ]; then
+            confirm="yes"
+            echo -e "${YELLOW}--yes supplied; installing Dokku${NC}"
+        else
+            read -p "Install Dokku now? (yes/no): " confirm
+        fi
         if [ "$confirm" = "yes" ]; then
             echo -e "${BLUE}Installing Dokku...${NC}"
             echo -e "${YELLOW}This may take a few minutes...${NC}"
             seed_remote_root_public_key "$ssh_alias"
-            install_dokku_with_recovery "$ssh_alias"
+            install_dokku_with_recovery "$ssh_alias" "$desired_dokku_version"
             echo -e "${GREEN}Dokku installed${NC}"
         else
             echo -e "${RED}Dokku is required. Exiting.${NC}"
             exit 1
         fi
     fi
+    echo ""
+
+    repair_dokku_builder_hooks "$ssh_alias"
+    repair_nginx_server_tokens_conflict "$ssh_alias"
     echo ""
 
     ensure_local_dokku_deploy_key "$ssh_alias"
@@ -743,6 +820,8 @@ setup_server() {
         fi
     elif [ -n "$current_email" ]; then
         echo -e "${GREEN}Let's Encrypt email already set: $current_email${NC}"
+    elif [ "${YES_TO_ALL:-false}" = true ]; then
+        echo -e "${YELLOW}No Let's Encrypt email configured; skipping email setup (--yes)${NC}"
     else
         read -p "Enter Let's Encrypt email address: " letsencrypt_email
         if [ -n "$letsencrypt_email" ]; then

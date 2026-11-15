@@ -82,6 +82,8 @@ SYNC_DIR=""
 SYNC_REFRESH=false
 SYNC_RESET=false
 SYNC_APPLY=false
+STORAGE_TRANSFER_MODE=false
+STORAGE_SOURCE_SSH=""
 FILTER_TAGS=()
 SELECTED_DEPLOYMENTS=()
 
@@ -106,6 +108,8 @@ show_help() {
     echo "  --no-clone          Skip cloning repos, only generate config.json and .env files (use with --import)"
     echo "  --backup            Backup PostgreSQL/MySQL databases and storage mounts"
     echo "  --restore <dir>     Restore PostgreSQL/MySQL databases and storage from backup dir"
+    echo "  --transfer-storage  Copy configured storage mounts from --source-ssh to the config target"
+    echo "  --source-ssh <alias> Source SSH alias for --transfer-storage"
     echo "  --backup-dir <dir>  Backup directory (default: ./backups)"
     echo "  --stop              Stop apps (use with --tag to stop by tag)"
     echo "  --start             Start apps (use with --tag to start by tag)"
@@ -241,6 +245,18 @@ while [[ $# -gt 0 ]]; do
             RESTORE_DIR="$2"
             shift 2
             ;;
+        --transfer-storage)
+            STORAGE_TRANSFER_MODE=true
+            shift
+            ;;
+        --source-ssh)
+            if [ $# -lt 2 ] || [[ "$2" == -* ]]; then
+                echo -e "${RED}Error: --source-ssh requires an SSH alias${NC}"
+                exit 1
+            fi
+            STORAGE_SOURCE_SSH="$2"
+            shift 2
+            ;;
         --backup-dir)
             BACKUP_DIR="$2"
             shift 2
@@ -313,8 +329,21 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [ "$SYNC_MODE" = true ] && { [ "$IMPORT_MODE" = true ] || [ "$SETUP_MODE" = true ] || [ "$BACKUP_MODE" = true ] || [ "$RESTORE_MODE" = true ] || [ "$CONFIG_ONLY" = true ] || [ "$LIST_MODE" = true ]; }; then
-    echo -e "${RED}Error: --sync cannot be combined with --import, --setup, --backup, --restore, or --config-only${NC}"
+if [ "$SYNC_MODE" = true ] && { [ "$IMPORT_MODE" = true ] || [ "$SETUP_MODE" = true ] || [ "$BACKUP_MODE" = true ] || [ "$RESTORE_MODE" = true ] || [ "$CONFIG_ONLY" = true ] || [ "$LIST_MODE" = true ] || [ "$STORAGE_TRANSFER_MODE" = true ]; }; then
+    echo -e "${RED}Error: --sync cannot be combined with --import, --setup, --backup, --restore, --transfer-storage, or --config-only${NC}"
+    exit 1
+fi
+
+if [ "$STORAGE_TRANSFER_MODE" = true ] && { [ -n "${SELECTED_DEPLOYMENTS[*]}" ] || [ "$BACKUP_MODE" = true ] || [ "$RESTORE_MODE" = true ] || [ "$IMPORT_MODE" = true ] || [ "$SETUP_MODE" = true ]; }; then
+    echo -e "${RED}Error: --transfer-storage cannot be combined with deployment filters or other migration modes${NC}"
+    exit 1
+fi
+if [ "$STORAGE_TRANSFER_MODE" = true ] && [ -z "$STORAGE_SOURCE_SSH" ]; then
+    echo -e "${RED}Error: --transfer-storage requires --source-ssh <alias>${NC}"
+    exit 1
+fi
+if [ -n "$STORAGE_SOURCE_SSH" ] && [ "$STORAGE_TRANSFER_MODE" = false ]; then
+    echo -e "${RED}Error: --source-ssh requires --transfer-storage${NC}"
     exit 1
 fi
 
@@ -328,6 +357,7 @@ for module in \
     "$SCRIPT_HOME/lib/import_setup.sh" \
     "$SCRIPT_HOME/lib/backup_restore.sh" \
     "$SCRIPT_HOME/lib/helpers.sh" \
+    "$SCRIPT_HOME/lib/storage_transfer.sh" \
     "$SCRIPT_HOME/lib/sync.sh" \
     "$SCRIPT_HOME/lib/deploy_ops.sh"; do
     if [ ! -f "$module" ]; then
@@ -439,9 +469,20 @@ if [ ! -f "$CONFIG_FILE" ]; then
     exit 1
 fi
 
+if [ "$STORAGE_TRANSFER_MODE" = true ]; then
+    export SSH_ALIAS=$(jq -r '.ssh_alias // .ssh_host' "$CONFIG_FILE")
+    if [ -z "$SSH_ALIAS" ] || [ "$SSH_ALIAS" = "null" ]; then
+        echo -e "${RED}Error: config must specify ssh_alias or ssh_host for the destination${NC}"
+        exit 1
+    fi
+    transfer_storage_mounts "$CONFIG_FILE" "$STORAGE_SOURCE_SSH" "$SSH_ALIAS"
+    exit $?
+fi
+
 # Get SSH host and alias from config (export for hooks)
 export SSH_ALIAS=$(jq -r '.ssh_alias // .ssh_host' "$CONFIG_FILE")
 export SSH_HOST=$(jq -r '.ssh_host // empty' "$CONFIG_FILE")
+MIGRATION_SOURCE_SSH=$(jq -r '.migration_source_ssh // empty' "$CONFIG_FILE")
 if [ -z "$SSH_HOST" ] || [ "$SSH_HOST" = "null" ]; then
     SSH_HOST="dokku@$SSH_ALIAS"
 fi
@@ -496,7 +537,10 @@ for parent_type in $(jq -r 'to_entries[] | select(.value | type == "object" and 
     parent_docker_options=$(echo "$parent_config" | jq -c '.docker_options // []')
     parent_extra_domains=$(echo "$parent_config" | jq -c '.extra_domains // []')
     parent_plugins=$(echo "$parent_config" | jq -c '.plugins // []')
+    parent_nginx_cors_origin=$(echo "$parent_config" | jq -r '.nginx_cors_origin // ""')
     parent_dokku_settings=$(echo "$parent_config" | jq -c '.dokku_settings // {}')
+    parent_source_app_name=$(echo "$parent_config" | jq -r '.source_app_name // ""')
+    parent_registry_auth_servers=$(echo "$parent_config" | jq -c '.registry_auth_servers // []')
     parent_postgres=$(echo "$parent_config" | jq -r '.postgres // false')
     parent_letsencrypt=$(echo "$parent_config" | jq -r '.letsencrypt // false')
 
@@ -508,6 +552,8 @@ for parent_type in $(jq -r 'to_entries[] | select(.value | type == "object" and 
         merged=$(jq -n \
             --arg domain "$domain" \
             --arg source_dir "$parent_source_dir" \
+            --arg source_app_name "$parent_source_app_name" \
+            --arg migration_source_ssh "$MIGRATION_SOURCE_SSH" \
             --arg branch "$parent_branch" \
             --arg subtree_prefix "$parent_subtree_prefix" \
             --arg builder "$parent_builder" \
@@ -520,11 +566,16 @@ for parent_type in $(jq -r 'to_entries[] | select(.value | type == "object" and 
             --argjson parent_docker_options "$parent_docker_options" \
             --argjson parent_extra_domains "$parent_extra_domains" \
             --argjson parent_plugins "$parent_plugins" \
+            --arg parent_nginx_cors_origin "$parent_nginx_cors_origin" \
             --argjson parent_dokku_settings "$parent_dokku_settings" \
+            --argjson parent_registry_auth_servers "$parent_registry_auth_servers" \
             --argjson child "$child_config" \
             '{
                 domain: $domain,
                 source_dir: (if ($child.source_dir // $source_dir) == "" then "." else ($child.source_dir // $source_dir) end),
+                source_app_name: (if $source_app_name == "" then null else $source_app_name end),
+                migration_source_ssh: (if $migration_source_ssh == "" then null else $migration_source_ssh end),
+                registry_auth_servers: (if $parent_registry_auth_servers == [] then null else $parent_registry_auth_servers end),
                 branch: (if ($child.branch // $branch) == "" then null else ($child.branch // $branch) end),
                 subtree_prefix: (if ($child.subtree_prefix // $subtree_prefix) == "" then null else ($child.subtree_prefix // $subtree_prefix) end),
                 builder: (if ($child.builder // $builder) == "" then null else ($child.builder // $builder) end),
@@ -538,6 +589,7 @@ for parent_type in $(jq -r 'to_entries[] | select(.value | type == "object" and 
                 docker_options: (($child.docker_options // []) + $parent_docker_options),
                 extra_domains: (($child.extra_domains // []) + $parent_extra_domains),
                 plugins: (($child.plugins // []) + $parent_plugins),
+                nginx_cors_origin: ($child.nginx_cors_origin // (if $parent_nginx_cors_origin == "" then null else $parent_nginx_cors_origin end)),
                 dokku_settings: ($parent_dokku_settings * ($child.dokku_settings // {}))
             }')
 

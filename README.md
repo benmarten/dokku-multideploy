@@ -253,6 +253,7 @@ your-project/
 | `ports` | Array of port mappings (`"http:80:3000"`) |
 | `extra_domains` | Additional domains to add |
 | `plugins` | Dokku plugins to install |
+| `nginx_cors_origin` | Enables the configured `nginx-cors` plugin and sets its allowed origin |
 | `dokku_settings` | Generic Dokku plugin settings map (for example `{"nginx":{"client-max-body-size":"100m"}}`) |
 
 #### Deployment Level
@@ -262,6 +263,8 @@ Same options as parent level, plus:
 | `tags` | Array of tags for filtering (`["production", "api"]`) |
 
 Child settings override parent settings.
+
+When `nginx-cors` appears in `plugins`, the deploy tool enables it for that app. Set `nginx_cors_origin` to restrict `Access-Control-Allow-Origin`; omit it to use the plugin's default `*` origin.
 
 ### Dokku Settings Map
 
