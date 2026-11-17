@@ -521,6 +521,7 @@ fi
 
 # Parse hierarchical config and flatten to deployments array
 DEPLOYMENTS=()
+root_plugins=$(jq -c '.plugins // []' "$CONFIG_FILE")
 
 # Process each parent type (only keys whose values are objects with deployments)
 for parent_type in $(jq -r 'to_entries[] | select(.value | type == "object" and has("deployments")) | .key' "$CONFIG_FILE"); do
@@ -537,12 +538,15 @@ for parent_type in $(jq -r 'to_entries[] | select(.value | type == "object" and 
     parent_docker_options=$(echo "$parent_config" | jq -c '.docker_options // []')
     parent_extra_domains=$(echo "$parent_config" | jq -c '.extra_domains // []')
     parent_plugins=$(echo "$parent_config" | jq -c '.plugins // []')
+    parent_plugins=$(jq -cn --argjson root "$root_plugins" --argjson parent "$parent_plugins" '$root + $parent | unique')
     parent_nginx_cors_origin=$(echo "$parent_config" | jq -r '.nginx_cors_origin // ""')
     parent_dokku_settings=$(echo "$parent_config" | jq -c '.dokku_settings // {}')
     parent_source_app_name=$(echo "$parent_config" | jq -r '.source_app_name // ""')
     parent_registry_auth_servers=$(echo "$parent_config" | jq -c '.registry_auth_servers // []')
     parent_postgres=$(echo "$parent_config" | jq -r '.postgres // false')
-    parent_letsencrypt=$(echo "$parent_config" | jq -r '.letsencrypt // false')
+    parent_letsencrypt=$(echo "$parent_config" | jq -c 'if has("letsencrypt") then (.letsencrypt == true or .letsencrypt == "true") else null end')
+    parent_public_http=$(echo "$parent_config" | jq -c '.public_http // true')
+    parent_nginx_cors=$(echo "$parent_config" | jq -c '.nginx_cors // false')
 
     # Process each deployment under this parent
     for domain in $(echo "$parent_config" | jq -r '.deployments | keys[]'); do
@@ -558,7 +562,7 @@ for parent_type in $(jq -r 'to_entries[] | select(.value | type == "object" and 
             --arg subtree_prefix "$parent_subtree_prefix" \
             --arg builder "$parent_builder" \
             --arg postgres "$parent_postgres" \
-            --arg letsencrypt "$parent_letsencrypt" \
+            --argjson parent_letsencrypt "$parent_letsencrypt" \
             --argjson parent_env_vars "$parent_env_vars" \
             --argjson parent_build_args "$parent_build_args" \
             --argjson parent_storage_mounts "$parent_storage_mounts" \
@@ -569,6 +573,8 @@ for parent_type in $(jq -r 'to_entries[] | select(.value | type == "object" and 
             --arg parent_nginx_cors_origin "$parent_nginx_cors_origin" \
             --argjson parent_dokku_settings "$parent_dokku_settings" \
             --argjson parent_registry_auth_servers "$parent_registry_auth_servers" \
+            --argjson parent_public_http "$parent_public_http" \
+            --argjson parent_nginx_cors "$parent_nginx_cors" \
             --argjson child "$child_config" \
             '{
                 domain: $domain,
@@ -581,7 +587,7 @@ for parent_type in $(jq -r 'to_entries[] | select(.value | type == "object" and 
                 builder: (if ($child.builder // $builder) == "" then null else ($child.builder // $builder) end),
                 tags: ($child.tags // []),
                 postgres: (($child.postgres // $postgres) == "true" or ($child.postgres // $postgres) == true),
-                letsencrypt: (($child.letsencrypt // $letsencrypt) == "true" or ($child.letsencrypt // $letsencrypt) == true),
+                letsencrypt: (if ($child | has("letsencrypt")) then ($child.letsencrypt == true or $child.letsencrypt == "true") else $parent_letsencrypt end),
                 env_vars: ($parent_env_vars + ($child.env_vars // {})),
                 build_args: ($parent_build_args + ($child.build_args // {})),
                 storage_mounts: (($child.storage_mounts // []) + $parent_storage_mounts),
@@ -590,6 +596,8 @@ for parent_type in $(jq -r 'to_entries[] | select(.value | type == "object" and 
                 extra_domains: (($child.extra_domains // []) + $parent_extra_domains),
                 plugins: (($child.plugins // []) + $parent_plugins),
                 nginx_cors_origin: ($child.nginx_cors_origin // (if $parent_nginx_cors_origin == "" then null else $parent_nginx_cors_origin end)),
+                public_http: (if ($child | has("public_http")) then $child.public_http else $parent_public_http end),
+                nginx_cors: (if ($child | has("nginx_cors")) then $child.nginx_cors else $parent_nginx_cors end),
                 dokku_settings: ($parent_dokku_settings * ($child.dokku_settings // {}))
             }')
 
@@ -733,14 +741,21 @@ if [ "$BACKUP_MODE" = true ]; then
         echo ""
     fi
 
-    # Extract MySQL database names from filtered deployments
+    # Extract MySQL database names from every configured database host variable
+    # (for example DATABASE_HOST, DB_HOST, or DMF_DB_HOST). Services used by
+    # app-specific variables must be backed up just like DATABASE_HOST services.
     MYSQL_DBS_TO_BACKUP=()
-    for deployment in "${FILTERED_DEPLOYMENTS[@]}"; do
-        db_host=$(echo "$deployment" | jq -r '.env_vars.DATABASE_HOST // empty')
-        if [[ "$db_host" =~ ^dokku-mysql-(.+)$ ]]; then
-            MYSQL_DBS_TO_BACKUP+=("${BASH_REMATCH[1]}")
-        fi
-    done
+    mysql_services=$(printf '%s\n' "${FILTERED_DEPLOYMENTS[@]}" | jq -s -r '
+        [ .[] | (.env_vars // {}) | to_entries[]
+          | select(.key | test("(^|_)(DB|DATABASE)_HOST$"))
+          | .value
+          | select(type == "string" and startswith("dokku-mysql-"))
+          | sub("^dokku-mysql-"; "")
+        ] | unique[]
+    ')
+    while IFS= read -r mysql_service; do
+        [ -n "$mysql_service" ] && MYSQL_DBS_TO_BACKUP+=("$mysql_service")
+    done <<< "$mysql_services"
 
     # Backup MySQL services (filtered by what the selected apps actually use)
     if [ ${#MYSQL_DBS_TO_BACKUP[@]} -gt 0 ]; then

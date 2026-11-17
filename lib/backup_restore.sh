@@ -30,6 +30,7 @@ backup_mysql_services() {
     shift
     local filter_dbs=("$@")
     local has_mysql=false
+    local mysql_version_map='{}'
 
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${GREEN}Backing up MySQL services${NC}"
@@ -77,6 +78,13 @@ backup_mysql_services() {
             if ssh -n $SSH_ALIAS "dokku mysql:export $service" 2>/dev/null | xz -9 > "$mysql_backup"; then
                 local size=$(du -h "$mysql_backup" | cut -f1)
                 echo -e "${GREEN}   Saved: $mysql_backup ($size)${NC}"
+                local service_version
+                service_version=$(ssh -n "$SSH_ALIAS" "dokku mysql:info '$service'" 2>/dev/null \
+                    | sed -n 's/^[[:space:]]*Version:[[:space:]]*mysql://p' | head -n 1 | xargs || true)
+                if [ -n "$service_version" ]; then
+                    mysql_version_map=$(printf '%s' "$mysql_version_map" | jq -c --arg service "$service" --arg version "$service_version" '. + {($service): $version}')
+                    printf '%s\n' "$mysql_version_map" > "$backup_dir/mysql-versions.json"
+                fi
             else
                 echo -e "${RED}   Failed to backup MySQL service: $service${NC}"
                 rm -f "$mysql_backup"
@@ -120,7 +128,14 @@ restore_mysql_services() {
 
         if ! ssh $SSH_ALIAS "dokku mysql:exists $service" 2>/dev/null; then
             echo -e "${BLUE}   Creating missing MySQL service: $service${NC}"
-            ssh $SSH_ALIAS "sudo dokku mysql:create $service" || true
+            local service_version
+            service_version=$(jq -r --arg service "$service" '.[$service] // empty' "$restore_dir/mysql-versions.json" 2>/dev/null || true)
+            if [ -n "$service_version" ]; then
+                echo -e "${BLUE}   Matching source MySQL image version: $service_version${NC}"
+                ssh $SSH_ALIAS "sudo dokku mysql:create $service --image-version '$service_version'" || true
+            else
+                ssh $SSH_ALIAS "sudo dokku mysql:create $service" || true
+            fi
         fi
 
         # Always ensure service is started before import
@@ -150,7 +165,14 @@ restore_mysql_services() {
             echo -e "${GREEN}   Restored: $service${NC}"
         else
             echo -e "${YELLOW}   Initial import failed, retrying without GTID_PURGED...${NC}"
-            if xz -dc "$file" | sed '/^SET @@GLOBAL.GTID_PURGED=/d' | ssh $SSH_ALIAS "dokku mysql:import $service" >/dev/null; then
+            if xz -dc "$file" | awk '
+                /^SET @@GLOBAL\.GTID_PURGED=/ { skip_gtid=1 }
+                skip_gtid {
+                    if (index($0, ";")) skip_gtid=0
+                    next
+                }
+                { print }
+            ' | ssh $SSH_ALIAS "dokku mysql:import $service" >/dev/null; then
                 echo -e "${GREEN}   Restored (GTID_PURGED stripped): $service${NC}"
             else
                 echo -e "${RED}   Failed to restore MySQL service: $service${NC}"
@@ -258,13 +280,13 @@ backup_app() {
                 continue
             fi
 
-            if ! ssh $SSH_ALIAS "[ -d '$host_path' ]" 2>/dev/null; then
+            if ! ssh -n "$SSH_ALIAS" "[ -d '$host_path' ]" 2>/dev/null; then
                 echo -e "${YELLOW}   Mount source missing on host, skipping: $host_path${NC}"
                 continue
             fi
 
             local mount_size_mb
-            mount_size_mb=$(ssh $SSH_ALIAS "du -sm '$host_path' 2>/dev/null | awk '{print \$1}'" 2>/dev/null || true)
+            mount_size_mb=$(ssh -n "$SSH_ALIAS" "du -sm '$host_path' 2>/dev/null | awk '{print \$1}'" 2>/dev/null || true)
             if [ -z "$mount_size_mb" ]; then
                 mount_size_mb=0
             fi
@@ -280,7 +302,7 @@ backup_app() {
             if [ "$DRY_RUN" = true ]; then
                 echo -e "${YELLOW}      [DRY RUN] Would backup to $storage_backup${NC}"
             else
-                if ssh $SSH_ALIAS "tar -C / -cf - '${host_path#/}'" 2>/dev/null | xz -9 > "$storage_backup"; then
+                if ssh -n "$SSH_ALIAS" "tar -C / -cf - '${host_path#/}'" 2>/dev/null | xz -9 > "$storage_backup"; then
                     local size=$(du -h "$storage_backup" | cut -f1)
                     echo -e "${GREEN}      Saved: $storage_backup ($size)${NC}"
                     has_backup=true
@@ -401,11 +423,11 @@ restore_app() {
             if [ "$DRY_RUN" = true ]; then
                 echo -e "${YELLOW}   [DRY RUN] Would restore from $storage_backup${NC}"
             else
-                ssh $SSH_ALIAS "sudo mkdir -p '$host_path'" || true
-                if xz -dc "$storage_backup" | ssh $SSH_ALIAS "sudo tar -C / -xf -" >/dev/null; then
+                ssh -n "$SSH_ALIAS" "sudo mkdir -p '$host_path'" || true
+                if xz -dc "$storage_backup" | ssh "$SSH_ALIAS" "sudo tar -C / -xf -" >/dev/null; then
                     echo -e "${GREEN}   Restored storage mount: $host_path${NC}"
                     echo -e "${BLUE}   Fixing ownership and permissions: $host_path${NC}"
-                    ssh $SSH_ALIAS "sudo chown -R dokku:dokku '$host_path' && sudo chmod -R a+rwX '$host_path'" || true
+                    ssh -n "$SSH_ALIAS" "sudo chown -R dokku:dokku '$host_path' && sudo chmod -R a+rwX '$host_path'" || true
                     restored_any_storage=true
                 else
                     echo -e "${RED}   Failed to restore storage mount: $host_path${NC}"

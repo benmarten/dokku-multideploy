@@ -220,6 +220,10 @@ ensure_public_http_port_mapping() {
     local deployment=$1
     local app_name=$2
 
+    if [ "$(echo "$deployment" | jq -r '.public_http // true')" = "false" ]; then
+        return 0
+    fi
+
     local configured_ports detected_ports
     configured_ports=$(echo "$deployment" | jq -r '.ports[]? // empty' 2>/dev/null)
     if echo "$configured_ports" | grep -Eq '^http:80:[0-9]+$'; then
@@ -259,15 +263,20 @@ ensure_public_http_port_mapping() {
 install_configured_plugins() {
     local deployment=$1
     local app_name=$2
-    local plugin plugin_name
+    local plugin plugin_name plugin_url
 
     while IFS= read -r plugin; do
         [ -z "$plugin" ] && continue
-        if [[ "$plugin" == *" "* ]]; then
+        if [[ "$plugin" =~ ^([^:]+):(https?://.*)$ ]]; then
+            plugin_name=${BASH_REMATCH[1]}
+            plugin_url=${BASH_REMATCH[2]}
+        elif [[ "$plugin" == *" "* ]]; then
             plugin_name=${plugin##* }
+            plugin_url=${plugin% *}
         else
             plugin_name=${plugin##*/}
             plugin_name=${plugin_name%.git}
+            plugin_url=$plugin
         fi
         if ssh -n "$SSH_ALIAS" "dokku plugin:list" 2>/dev/null \
             | awk -v name="$plugin_name" '$1 == name { found=1 } END { exit !found }'; then
@@ -276,7 +285,7 @@ install_configured_plugins() {
         fi
 
         echo -e "${BLUE}Installing plugin for $app_name: $plugin${NC}"
-        if ! ssh -n "$SSH_ALIAS" "dokku plugin:install $plugin"; then
+        if ! ssh -n "$SSH_ALIAS" "dokku plugin:install '$plugin_url' '$plugin_name'"; then
             echo -e "${RED}Failed to install plugin '$plugin_name' for $app_name${NC}"
             return 1
         fi
@@ -286,14 +295,23 @@ install_configured_plugins() {
 apply_nginx_cors_configuration() {
     local deployment=$1
     local app_name=$2
-    local cors_plugin origin current_origin cors_enabled encoded_origin
+    local origin current_origin cors_enabled cors_desired encoded_origin
 
-    cors_plugin=$(echo "$deployment" | jq -r '[.plugins[]? | select(contains("nginx-cors"))] | length > 0')
     origin=$(echo "$deployment" | jq -r '.nginx_cors_origin // empty')
-    [ "$cors_plugin" = "true" ] || [ -n "$origin" ] || return 0
+    cors_desired=$(echo "$deployment" | jq -r 'if .nginx_cors == true then true elif .nginx_cors == false then false else (.nginx_cors_origin // "") != "" end')
 
     if [ "$DRY_RUN" = true ]; then
-        echo -e "${YELLOW}[DRY RUN] Would configure nginx CORS for $app_name${NC}"
+        echo -e "${YELLOW}[DRY RUN] nginx CORS desired state for $app_name: $cors_desired${NC}"
+        return 0
+    fi
+
+    cors_enabled=$(ssh -n "$SSH_ALIAS" "test -f /home/dokku/$app_name/NGINX_CORS && echo yes || echo no" 2>/dev/null || echo no)
+
+    if [ "$cors_desired" = "false" ]; then
+        if [ "$cors_enabled" = "yes" ]; then
+            echo -e "${BLUE}Disabling nginx CORS for $app_name${NC}"
+            ssh -n "$SSH_ALIAS" "dokku nginx-cors:disable $app_name" || return 1
+        fi
         return 0
     fi
 
@@ -303,7 +321,6 @@ apply_nginx_cors_configuration() {
         return 1
     fi
 
-    cors_enabled=$(ssh -n "$SSH_ALIAS" "test -f /home/dokku/$app_name/NGINX_CORS && echo yes" 2>/dev/null || true)
     if [ -n "$origin" ]; then
         current_origin=$(ssh -n "$SSH_ALIAS" "cat /home/dokku/$app_name/NGINX_CORS_ORIGIN 2>/dev/null || true")
         if [ "$current_origin" != "$origin" ] || [ "$cors_enabled" != "yes" ]; then
@@ -316,6 +333,12 @@ apply_nginx_cors_configuration() {
     elif [ "$cors_enabled" != "yes" ]; then
         echo -e "${BLUE}Enabling nginx CORS for $app_name${NC}"
         ssh -n "$SSH_ALIAS" "dokku nginx-cors:enable $app_name" || return 1
+    else
+        current_origin=$(ssh -n "$SSH_ALIAS" "cat /home/dokku/$app_name/NGINX_CORS_ORIGIN 2>/dev/null || true")
+        if [ -n "$current_origin" ]; then
+            echo -e "${BLUE}Clearing custom nginx CORS origin for $app_name${NC}"
+            ssh -n "$SSH_ALIAS" "dokku nginx-cors:clear-origin $app_name" || return 1
+        fi
     fi
 }
 
@@ -324,7 +347,7 @@ apply_config_only() {
     local domain=$(echo "$deployment" | jq -r '.domain')
     local source_dir=$(echo "$deployment" | jq -r '.source_dir')
     local app_name=$(echo "$domain" | tr '.' '-')
-    local enable_letsencrypt=$(echo "$deployment" | jq -r '.letsencrypt // false')
+    local enable_letsencrypt=$(echo "$deployment" | jq -r 'if .letsencrypt == null then "unset" else (.letsencrypt | tostring) end')
     local dokku_settings=$(echo "$deployment" | jq -c '.dokku_settings // {}')
 
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -434,7 +457,7 @@ apply_config_only() {
         while IFS= read -r opt; do
             [ -z "$opt" ] && continue
             echo -e "${BLUE}   Adding: $opt${NC}"
-            ssh $SSH_ALIAS "dokku docker-options:add $app_name deploy '$opt'" || true
+            ssh -n $SSH_ALIAS "dokku docker-options:add $app_name deploy '$opt'" || true
         done < <(echo "$deployment" | jq -r '.docker_options[]')
     fi
 
@@ -482,6 +505,15 @@ apply_config_only() {
                 echo -e "${YELLOW}   You can enable it manually later with:${NC}"
                 echo -e "${YELLOW}   ssh $SSH_ALIAS dokku letsencrypt:enable $app_name${NC}"
             fi
+        fi
+    fi
+
+    if [ "$enable_letsencrypt" = "false" ]; then
+        local le_active
+        le_active=$(ssh -n "$SSH_ALIAS" "dokku letsencrypt:active $app_name" 2>/dev/null | head -n1 | xargs || true)
+        if [ "$le_active" = "true" ]; then
+            echo -e "${BLUE}Disabling Let's Encrypt SSL for $app_name as configured${NC}"
+            ssh -n "$SSH_ALIAS" "dokku letsencrypt:disable $app_name" || return 1
         fi
     fi
 
@@ -584,7 +616,7 @@ deploy_app() {
         source_path="$SCRIPT_DIR/$source_dir"
     fi
     local enable_postgres=$(echo "$deployment" | jq -r '.postgres')
-    local enable_letsencrypt=$(echo "$deployment" | jq -r '.letsencrypt')
+    local enable_letsencrypt=$(echo "$deployment" | jq -r 'if .letsencrypt == null then "unset" else (.letsencrypt | tostring) end')
     local builder_type=$(echo "$deployment" | jq -r '.builder // empty')
     local dokku_settings=$(echo "$deployment" | jq -c '.dokku_settings // {}')
     local mysql_service_name=""
@@ -897,13 +929,24 @@ deploy_app() {
         fi
     fi
 
-    # Auto-provision MySQL when DATABASE_HOST points to dokku-mysql-<service>
-    mysql_host=$(echo "$deployment" | jq -r '.env_vars.DATABASE_HOST // empty')
+    # Auto-provision and link MySQL services referenced by any app-specific
+    # database host variable (DATABASE_HOST, DB_HOST, DMF_DB_HOST, etc.).
+    mysql_host=$(echo "$deployment" | jq -r '
+        [(.env_vars // {}) | to_entries[]
+         | select(.key | test("(^|_)(DB|DATABASE)_HOST$"))
+         | .value | select(type == "string" and startswith("dokku-mysql-"))][0] // empty
+    ')
     if [ -z "$mysql_host" ]; then
-        mysql_host=$(get_env_value "$SCRIPT_DIR/.env/$domain" "DATABASE_HOST")
+        for db_host_key in DATABASE_HOST DB_HOST DMF_DB_HOST; do
+            mysql_host=$(get_env_value "$SCRIPT_DIR/.env/$domain" "$db_host_key")
+            [ -n "$mysql_host" ] && break
+        done
     fi
     if [ -z "$mysql_host" ]; then
-        mysql_host=$(get_env_value "$SCRIPT_DIR/.env/_$source_dir" "DATABASE_HOST")
+        for db_host_key in DATABASE_HOST DB_HOST DMF_DB_HOST; do
+            mysql_host=$(get_env_value "$SCRIPT_DIR/.env/_$source_dir" "$db_host_key")
+            [ -n "$mysql_host" ] && break
+        done
     fi
 
     if [[ "$mysql_host" == dokku-mysql-* ]]; then
@@ -1032,7 +1075,7 @@ deploy_app() {
         while IFS= read -r opt; do
             [ -z "$opt" ] && continue
             echo -e "${BLUE}   Adding: $opt${NC}"
-            ssh $SSH_ALIAS "dokku docker-options:add $app_name deploy '$opt'" || true
+            ssh -n $SSH_ALIAS "dokku docker-options:add $app_name deploy '$opt'" || true
         done < <(echo "$deployment" | jq -r '.docker_options[]')
     fi
 
@@ -1304,6 +1347,15 @@ deploy_app() {
                 echo -e "${YELLOW}   You can enable it manually later with:${NC}"
                 echo -e "${YELLOW}   ssh $SSH_ALIAS dokku letsencrypt:enable $app_name${NC}"
             fi
+        fi
+    fi
+
+    if [ "$enable_letsencrypt" = "false" ]; then
+        local le_active
+        le_active=$(ssh -n "$SSH_ALIAS" "dokku letsencrypt:active $app_name" 2>/dev/null | head -n1 | xargs || true)
+        if [ "$le_active" = "true" ]; then
+            echo -e "${BLUE}Disabling Let's Encrypt SSL for $app_name as configured${NC}"
+            ssh -n "$SSH_ALIAS" "dokku letsencrypt:disable $app_name" || return 1
         fi
     fi
 

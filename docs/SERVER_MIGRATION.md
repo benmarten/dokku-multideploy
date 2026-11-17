@@ -6,11 +6,10 @@ This guide covers migrating Dokku applications from one server to another using 
 
 The migration process involves:
 1. Setting up the new server
-2. Stopping apps on the old server (to prevent data changes)
-3. Backing up databases and small storage from the old server
-4. Restoring databases and small storage to the new server
-5. Deploying all apps on the new server
-6. Syncing large storage directories directly between servers
+2. Backing up databases and small storage from the old server
+3. Restoring databases and small storage to the new server
+4. Deploying apps and transferring storage directly between servers
+5. Updating DNS after the target is prepared
 
 ## Prerequisites
 
@@ -35,19 +34,7 @@ This will:
 - Set up Docker networks
 - Configure MySQL port exposures
 
-### 2. Stop Apps on Old Server
-
-Prevent data changes during migration by stopping all apps:
-
-```bash
-# Stop nonprod apps
-CONFIG_FILE=config.json deploy --stop --tag nonprod
-
-# Or stop production apps
-CONFIG_FILE=config.json deploy --stop --tag production
-```
-
-### 3. Backup from Old Server
+### 2. Backup from Old Server
 
 Backup databases and storage (excluding large directories):
 
@@ -66,7 +53,7 @@ CONFIG_FILE=config.json deploy --backup --tag production \
 - Skip storage directories larger than 100MB (configurable via `BACKUP_MAX_STORAGE_MB`)
 - Show a summary of skipped paths that need manual rsync
 
-### 4. Restore to New Server
+### 3. Restore to New Server
 
 Restore databases and storage to the new server:
 
@@ -85,7 +72,7 @@ This will:
 - Import database dumps
 - Restore small storage directories
 
-### 5. Deploy Apps
+### 4. Deploy Apps
 
 Deploy all applications to link databases, configure networks, and start apps:
 
@@ -104,7 +91,21 @@ The `--force` flag ensures deployment even if commits match, which is necessary 
 - Configuring environment variables
 - Setting up SSL certificates
 
-### 6. Sync Large Storage Directories
+### 5. Transfer Storage Directly Between Servers
+
+Set `ssh_alias` in a target config to the new server, then run:
+
+```bash
+CONFIG_FILE=config.target.json deploy --transfer-storage --source-ssh viewtlab-prod
+```
+
+The target pulls configured absolute storage mounts directly from the source
+using a temporary SSH key. The command removes that key after transfer. It uses
+`rsync --delete`, so review configured mount paths before running it. Run it
+again after DNS cutover to pick up files written during the initial copy.
+
+The manual rsync examples below remain available for transferring individual
+paths when needed.
 
 For directories that were too large to backup (listed in the backup summary), use direct server-to-server rsync:
 
@@ -146,35 +147,30 @@ CONFIG_FILE=config.prod.json deploy --config-only --tag production
 # 1. Setup fresh nonprod server
 CONFIG_FILE=config.nonprod.json deploy --setup
 
-# 2. Stop all nonprod apps on OLD server
-CONFIG_FILE=config.json deploy --stop --tag nonprod
-
-# 3. Backup nonprod from old server
+# 2. Backup nonprod from the source server
 CONFIG_FILE=config.json deploy --backup --tag nonprod \
   --backup-dir ./backups/nonprod-$(date +%Y%m%d-%H%M%S)
 
-# 4. Restore to new nonprod server
-CONFIG_FILE=config.nonprod.json deploy --restore \
+# 3. Restore to new nonprod server
+CONFIG_FILE=config.target.json deploy --restore \
   ./backups/nonprod-20260612-133147/2026-06-12_133150
 
-# 5. Deploy all nonprod apps
-CONFIG_FILE=config.nonprod.json deploy --tag nonprod --force
+# 4. Deploy all nonprod apps
+CONFIG_FILE=config.target.json deploy --tag nonprod --force
 
-# 6. Rsync large storage directories
-ssh viewtlab "rsync -avz --progress \
-  /var/lib/dokku/data/storage/test-viewtlab-com-be/uploads/ \
-  viewtlab-nonprod:/var/lib/dokku/data/storage/test-viewtlab-com-be/uploads/"
+# 6. Transfer configured storage mounts directly
+CONFIG_FILE=config.target.json deploy --transfer-storage --source-ssh viewtlab
 
-ssh viewtlab "rsync -avz --progress \
-  /var/lib/dokku/data/storage/staging-viewtlab-com-be/uploads/ \
-  viewtlab-nonprod:/var/lib/dokku/data/storage/staging-viewtlab-com-be/uploads/"
+# 7. Update DNS after the target is prepared
+```
 
-ssh viewtlab "rsync -avz --progress \
-  /var/lib/dokku/data/storage/sentry-viewtlab-com/ \
-  viewtlab-nonprod:/var/lib/dokku/data/storage/sentry-viewtlab-com/"
+Keep the source available until the migration is confirmed. Provide the target
+IP and public domains before changing DNS; start and verify target apps after
+DNS points to the target.
 
-# 7. Re-apply configured storage ownership/permissions on the target
-CONFIG_FILE=config.nonprod.json deploy --config-only --tag nonprod
+```bash
+# Continue after DNS points to the target
+CONFIG_FILE=config.target.json deploy --start --tag production
 ```
 
 ## Verification

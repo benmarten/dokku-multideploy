@@ -246,14 +246,15 @@ your-project/
 | `branch` | Git branch to deploy (auto-detects if not set) |
 | `builder` | Dokku builder type (for example `dockerfile`, `herokuish`, or `pack`) |
 | `postgres` | Auto-create and link PostgreSQL database (`true`/`false`) |
-| `letsencrypt` | Auto-provision Let's Encrypt SSL (`true`/`false`) |
+| `letsencrypt` | Desired Let's Encrypt SSL state (`true` enables; `false` disables; omit to leave the current state unchanged) |
 | `env_vars` | Environment variables (set at runtime) |
 | `build_args` | Docker build arguments (set at build time) |
 | `storage_mounts` | Array of storage mounts - string `"host:container"` or object `{"mount": "host:container", "backup": false}` |
 | `ports` | Array of port mappings (`"http:80:3000"`) |
 | `extra_domains` | Additional domains to add |
 | `plugins` | Dokku plugins to install |
-| `nginx_cors_origin` | Enables the configured `nginx-cors` plugin and sets its allowed origin |
+| `nginx_cors` | Enables or disables nginx CORS for this app (defaults to `false`) |
+| `nginx_cors_origin` | Allowed origin when nginx CORS is enabled; setting it also enables nginx CORS |
 | `dokku_settings` | Generic Dokku plugin settings map (for example `{"nginx":{"client-max-body-size":"100m"}}`) |
 
 #### Deployment Level
@@ -264,7 +265,7 @@ Same options as parent level, plus:
 
 Child settings override parent settings.
 
-When `nginx-cors` appears in `plugins`, the deploy tool enables it for that app. Set `nginx_cors_origin` to restrict `Access-Control-Allow-Origin`; omit it to use the plugin's default `*` origin.
+`plugins` only installs Dokku plugins. Set `nginx_cors: true` to enable nginx CORS for an app; set `nginx_cors_origin` as well when a specific origin is required. Setting `nginx_cors: false` disables it even when the plugin is installed globally. This avoids adding wildcard headers on top of CORS headers already emitted by an application.
 
 ### Dokku Settings Map
 

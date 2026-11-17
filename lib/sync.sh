@@ -243,7 +243,9 @@ sync_apply_summary_to_child_patch() {
             branch: (.branch // null),
             builder: (.builder // null),
             postgres: (if .postgres == true then true else null end),
-            letsencrypt: (if .letsencrypt == true then true else null end),
+            letsencrypt: (.letsencrypt == true),
+            nginx_cors: (if has("nginx_cors") then .nginx_cors else false end),
+            nginx_cors_origin: (.nginx_cors_origin // null),
             env_vars: (
                 if (.env_vars | length) > 0 then
                     (.env_vars | to_entries | sort_by(.key) | from_entries)
@@ -292,7 +294,9 @@ apply_sync_patch_to_config() {
                         | (if ($patch | has("branch")) then (if ($patch.branch == null) then del(.branch) else .branch = $patch.branch end) else . end)
                         | (if ($patch | has("builder")) then (if ($patch.builder == null) then del(.builder) else .builder = $patch.builder end) else . end)
                         | (if ($patch | has("postgres")) then (if ($patch.postgres == null) then del(.postgres) else .postgres = true end) else . end)
-                        | (if ($patch | has("letsencrypt")) then (if ($patch.letsencrypt == null) then del(.letsencrypt) else .letsencrypt = true end) else . end)
+                        | (if ($patch | has("letsencrypt")) then (if ($patch.letsencrypt == null) then del(.letsencrypt) else .letsencrypt = $patch.letsencrypt end) else . end)
+                        | (if ($patch | has("nginx_cors")) then .nginx_cors = $patch.nginx_cors else . end)
+                        | (if ($patch | has("nginx_cors_origin")) then (if ($patch.nginx_cors_origin == null) then del(.nginx_cors_origin) else .nginx_cors_origin = $patch.nginx_cors_origin end) else . end)
                         | (if ($patch | has("env_vars")) then (if ($patch.env_vars == null) then del(.env_vars) else .env_vars = $patch.env_vars end) else . end)
                         | (if ($patch | has("build_args")) then (if ($patch.build_args == null) then del(.build_args) else .build_args = $patch.build_args end) else . end)
                         | (if ($patch | has("ports")) then (if ($patch.ports == null) then del(.ports) else .ports = $patch.ports end) else . end)
@@ -333,7 +337,9 @@ get_effective_local_summary_for_domain() {
                 branch: ($child.branch // $parent.branch // null),
                 builder: ($child.builder // $parent.builder // null),
                 postgres: (($child.postgres // $parent.postgres // false) == true or ($child.postgres // $parent.postgres // false) == "true"),
-                letsencrypt: (($child.letsencrypt // $parent.letsencrypt // false) == true or ($child.letsencrypt // $parent.letsencrypt // false) == "true"),
+                letsencrypt: (if ($child | has("letsencrypt")) then ($child.letsencrypt == true or $child.letsencrypt == "true") else (($parent.letsencrypt // false) == true or ($parent.letsencrypt // false) == "true") end),
+                nginx_cors: (if ($child | has("nginx_cors")) then $child.nginx_cors else ($parent.nginx_cors // false) end),
+                nginx_cors_origin: ($child.nginx_cors_origin // $parent.nginx_cors_origin // null),
                 env_vars: ((($parent.env_vars // {}) + ($child.env_vars // {})) | to_entries | sort_by(.key) | from_entries),
                 build_args: ((($parent.build_args // {}) + ($child.build_args // {})) | to_entries | sort_by(.key) | from_entries),
                 ports: (($child.ports // $parent.ports // []) | map(tostring) | sort),
@@ -554,7 +560,9 @@ run_sync_check() {
             branch: (.branch // null),
             builder: (.builder // null),
             postgres: (.postgres == true),
-            letsencrypt: (.letsencrypt == true),
+            letsencrypt: (if has("letsencrypt") then (.letsencrypt == true or .letsencrypt == "true") else false end),
+            nginx_cors: (if has("nginx_cors") then .nginx_cors else false end),
+            nginx_cors_origin: (.nginx_cors_origin // null),
             env_vars: ((.env_vars // {}) | to_entries | sort_by(.key) | from_entries),
             build_args: ((.build_args // {}) | to_entries | sort_by(.key) | from_entries),
             ports: ((.ports // [])
@@ -612,7 +620,7 @@ run_sync_check() {
 
         local diff_fields=()
         local field
-        for field in branch builder postgres letsencrypt env_vars build_args ports storage_mounts docker_options extra_domains dokku_settings; do
+        for field in branch builder postgres letsencrypt nginx_cors nginx_cors_origin env_vars build_args ports storage_mounts docker_options extra_domains dokku_settings; do
             local local_val
             local remote_val
             local_val=$(echo "$local_summary" | jq -c ".$field")

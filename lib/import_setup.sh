@@ -27,6 +27,14 @@ fetch_remote_app_report_bundle() {
         print_section git_report dokku git:report \"\$app\"
     " 2>/dev/null || true)
 
+    local nginx_cors_enabled nginx_cors_origin
+    nginx_cors_enabled=$(ssh -n "$ssh_alias" "test -f /home/dokku/$app/NGINX_CORS && echo true || echo false" 2>/dev/null || echo false)
+    nginx_cors_origin=$(ssh -n "$ssh_alias" "cat /home/dokku/$app/NGINX_CORS_ORIGIN 2>/dev/null || true" 2>/dev/null || true)
+    bundle+=$'\n__DOKKU_MULTI_BEGIN__nginx_cors__\n'
+    bundle+="Nginx CORS enabled: $nginx_cors_enabled"$'\n'
+    bundle+="Nginx CORS origin: $nginx_cors_origin"$'\n'
+    bundle+="__DOKKU_MULTI_END__nginx_cors__"
+
     if ! printf '%s\n' "$bundle" | grep -q "__DOKKU_MULTI_BEGIN__config_export__"; then
         return 1
     fi
@@ -334,6 +342,13 @@ import_from_server() {
             echo -e "  Let's Encrypt: active"
         fi
 
+        local nginx_cors="false"
+        local nginx_cors_status
+        local nginx_cors_origin
+        nginx_cors_status=$(extract_remote_app_report_section "$app_report_bundle" nginx_cors | sed -n 's/^Nginx CORS enabled:[[:space:]]*//p' | head -n1 | xargs || true)
+        [ "$nginx_cors_status" = "true" ] && nginx_cors="true"
+        nginx_cors_origin=$(extract_remote_app_report_section "$app_report_bundle" nginx_cors | sed -n 's/^Nginx CORS origin:[[:space:]]*//p' | head -n1 | xargs || true)
+
         # Get builder type
         local builder=""
         builder=$(extract_remote_app_report_section "$app_report_bundle" builder | sed -n 's/.*Builder selected:[[:space:]]*//p' | head -n1 | xargs)
@@ -509,6 +524,8 @@ import_from_server() {
             --arg builder "$builder" \
             --arg postgres "$postgres" \
             --arg letsencrypt "$letsencrypt" \
+            --arg nginx_cors "$nginx_cors" \
+            --arg nginx_cors_origin "$nginx_cors_origin" \
             --argjson ports "$ports_json" \
             --argjson storage "$storage_json" \
             --argjson docker_options "$docker_options_json" \
@@ -524,7 +541,9 @@ import_from_server() {
                 branch: $branch,
                 builder: (if $builder == "" then null else $builder end),
                 postgres: (if $postgres == "true" then true else null end),
-                letsencrypt: (if $letsencrypt == "true" then true else null end),
+                letsencrypt: ($letsencrypt == "true"),
+                nginx_cors: ($nginx_cors == "true"),
+                nginx_cors_origin: (if $nginx_cors_origin == "" then null else $nginx_cors_origin end),
                 ports: (if $ports == [] then null else $ports end),
                 storage_mounts: (if $storage == [] then null else $storage end),
                 docker_options: (if $docker_options == [] then null else $docker_options end),
@@ -537,7 +556,7 @@ import_from_server() {
                         + (if $imported_public_build_args == {} then {} else {build_args: $imported_public_build_args} end)
                     )
                 }
-            } | with_entries(select(.value != null and .value != false))')
+            } | with_entries(select(.value != null))')
 
         # Add to main config
         config_json=$(echo "$config_json" | jq --arg key "$parent_key" --argjson config "$deployment_config" '.[$key] = $config')
